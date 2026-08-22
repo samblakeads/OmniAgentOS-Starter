@@ -121,6 +121,26 @@ def test_selection_is_deterministic_and_scores_the_right_pack(tmp_path):
     assert lib.select("Write 3 ad headlines with a character limit", k=2)[1] == scores
 
 
+def test_best_match_uses_the_same_floor_as_select_and_keeps_a_below_floor_score(tmp_path):
+    """Per-task routing needs the losing score, not a silent zeroed generalist."""
+    write_pack(tmp_path, "marketing-content", "ad-copy-writer")
+    write_pack(tmp_path, "finance-reporting", "expense-categorizer")
+    lib = load_skills(tmp_path)
+    pack, score, below = lib.best_match("Write 3 ad headlines with a character limit")
+    assert pack is not None and pack.slug == "ad-copy-writer"
+    assert below is False and score > 0
+    _, select_scores, fallback = lib.select("Write 3 ad headlines with a character limit", k=1)
+    assert fallback is False
+    assert select_scores[0]["score"] == score
+
+    miss, miss_score, miss_below = lib.best_match("zzzz qqqq wwww")
+    assert miss_below is True
+    assert miss_score == 0.0
+    # empty shelf: allowed set that names nobody
+    empty, empty_score, empty_below = lib.best_match("Write 3 ad headlines", allowed=set())
+    assert empty is None and empty_score == 0.0 and empty_below is True
+
+
 def test_removing_a_category_makes_its_pack_unselectable(tmp_path):
     goal = "Write ad headlines and body copy with a character limit for a paid campaign"
     path = write_pack(tmp_path, "marketing-content", "ad-copy-writer")

@@ -35,11 +35,57 @@ TWO_TASK_PLAN = {
     "dod": [{"id": "p1", "criterion": "Both parts are present."}],
     "tasks": [
         {"id": "t1", "title": "Score the niche", "skill_id": "niche-opportunity-scorer",
-         "instruction": "score it", "member": "vera", "depends_on": []},
+         "instruction": "Research the niche and score the opportunity with a numeric rating.",
+         "member": "vera", "depends_on": []},
         {"id": "t2", "title": "Write the headlines", "skill_id": "ad-copy-framework-writer",
-         "instruction": "write them", "member": "nils", "depends_on": ["t1"]},
+         "instruction": "Write three ad copy headlines using PAS framework with character limits for a Meta feed ad.",
+         "member": "nils", "depends_on": ["t1"]},
     ],
 }
+
+# The live D18 shape: planner piles both parts onto one member with a VSL pack
+# that neither task can satisfy. Per-task scoring must undo this.
+COLLAPSED_PLAN = {
+    "dod": [{"id": "p1", "criterion": "Both parts are present."}],
+    "tasks": [
+        {
+            "id": "t1",
+            "title": "Ad headline",
+            "skill_id": "vsl-script-builder",
+            "instruction": (
+                "Write three ad copy headlines using PAS framework with character "
+                "limits for a Meta feed ad for a meal-prep service."
+            ),
+            "member": "max",
+            "depends_on": [],
+        },
+        {
+            "id": "t2",
+            "title": "Refund reply",
+            "skill_id": "vsl-script-builder",
+            "instruction": (
+                "Draft a short reply to a customer refund request citing the 30-day "
+                "refund policy and decide Approved, Denied, or Escalate."
+            ),
+            "member": "max",
+            "depends_on": [],
+        },
+    ],
+}
+
+COPYWRITER = {
+    "name": "Max",
+    "title": "",
+    "persona": "Max writes ad copy and will not discuss refunds.",
+    "skills": ["ad-copy-framework-writer", "vsl-script-builder"],
+}
+SUPPORT = {
+    "name": "Ava",
+    "title": "",
+    "persona": "Ava handles refunds and never writes headlines.",
+    "skills": ["refund-request-handler"],
+}
+STUDIO = {"name": "Remy", "title": "", "persona": DIRECTOR_PERSONA, "team": ["max", "ava"]}
 
 
 def _roster(tmp_path, payloads, library=None):
@@ -217,6 +263,10 @@ async def test_the_manager_frames_the_plan(settings, tmp_path):
     planner = script.prompt_text("planner")
     assert DIRECTOR_PERSONA in planner, "the manager's persona frames the plan"
     assert "YOUR TEAM" in planner
+    assert "SKILLS OF EACH MEMBER" in planner
+    assert "ad-copy-framework-writer" in planner
+    assert "niche-opportunity-scorer" in planner
+    assert "MUST go to different members" in planner
     for persona in (WRITER_PERSONA, RESEARCH_PERSONA):
         assert persona in planner, "the planner must know who it can delegate to"
 
@@ -248,6 +298,131 @@ async def test_a_member_the_planner_invented_is_replaced_by_a_real_one(settings,
     run = orch.create(GOAL, 1, [], agent_id="dara")
     await orch.execute(run)
     assert {d["member"] for d in _events(run, "team.delegated")} <= {"nils", "vera"}
+
+
+@pytest.mark.asyncio
+async def test_per_task_pack_relevance_splits_a_collapsed_plan(settings, tmp_path):
+    """Two-part goal + two distinct packs must not collapse onto one member.
+
+    The planner here assigns BOTH tasks to Max with `vsl-script-builder` —
+    the live D18 failure. After the post-pass: t1 is Max with the ad-copy
+    pack only, t2 is Ava with the refund pack only. VSL checks never bind.
+    """
+    script = Script(plan=COLLAPSED_PLAN)
+    orch = _orch(settings, script, tmp_path, [COPYWRITER, SUPPORT, STUDIO])
+    run = orch.create(
+        "Part 1: write one punchy ad headline for a meal-prep service. "
+        "Part 2: draft a short reply to a customer refund request citing the 30-day policy.",
+        1,
+        [],
+        agent_id="remy",
+    )
+    await orch.execute(run)
+
+    delegated = {d["task_id"]: d for d in _events(run, "team.delegated")}
+    assert set(delegated) == {"t1", "t2"}, delegated
+    assert delegated["t1"]["member"] == "max"
+    assert delegated["t2"]["member"] == "ava"
+    assert delegated["t1"]["skill_id"] == "ad-copy-framework-writer"
+    assert delegated["t2"]["skill_id"] == "refund-request-handler"
+
+    plan = _events(run, "planner.plan")[0]
+    by_id = {t["id"]: t for t in plan["tasks"]}
+    assert by_id["t1"]["member"] == "max" and by_id["t1"]["skill_id"] == "ad-copy-framework-writer"
+    assert by_id["t2"]["member"] == "ava" and by_id["t2"]["skill_id"] == "refund-request-handler"
+
+    skill_dod = [c for c in plan["dod"] if c["source"] not in ("planner", "operator")]
+    t1_src = {c["source"] for c in skill_dod if c.get("task_id") == "t1"}
+    t2_src = {c["source"] for c in skill_dod if c.get("task_id") == "t2"}
+    assert t1_src == {"ad-copy-framework-writer"}, t1_src
+    assert t2_src == {"refund-request-handler"}, t2_src
+    assert "vsl-script-builder" not in t1_src | t2_src
+    assert {c.get("member") for c in skill_dod if c.get("task_id") == "t1"} == {"max"}
+    assert {c.get("member") for c in skill_dod if c.get("task_id") == "t2"} == {"ava"}
+    assert not _events(run, "skill.selection_fallback")
+
+
+@pytest.mark.asyncio
+async def test_a_task_matching_no_member_pack_uses_generalist_and_emits_fallback(settings, tmp_path):
+    """A task neither specialist covers must not inherit a sibling's QUALITY CHECKS."""
+    plan = {
+        "dod": [{"id": "p1", "criterion": "The poem is in iambic pentameter."}],
+        "tasks": [
+            {
+                "id": "t1",
+                "title": "Kalman poem",
+                "skill_id": "vsl-script-builder",
+                "instruction": "Explain the Kalman filter to a sceptical cat in iambic pentameter.",
+                "member": "max",
+            }
+        ],
+    }
+    script = Script(plan=plan)
+    orch = _orch(settings, script, tmp_path, [COPYWRITER, SUPPORT, STUDIO])
+    run = orch.create(
+        "Explain the Kalman filter to a sceptical cat in iambic pentameter.",
+        1,
+        [],
+        agent_id="remy",
+    )
+    await orch.execute(run)
+
+    fallback = _events(run, "skill.selection_fallback")
+    assert fallback, "a task that matches no member pack must announce the fallback"
+    assert any(f.get("task_id") == "t1" for f in fallback), fallback
+    assert fallback[-1]["skill_id"] == "general-assistant"
+
+    delegated = _events(run, "team.delegated")
+    assert len(delegated) == 1
+    assert delegated[0]["member"] in {"max", "ava"}
+    assert delegated[0]["skill_id"] == "general-assistant"
+
+    plan_payload = _events(run, "planner.plan")[0]
+    assert plan_payload["tasks"][0]["skill_id"] == "general-assistant"
+    sources = {c["source"] for c in plan_payload["dod"] if c.get("task_id") == "t1"}
+    assert "general-assistant" in sources, plan_payload["dod"]
+    assert "vsl-script-builder" not in sources
+    assert "ad-copy-framework-writer" not in sources
+    assert "refund-request-handler" not in sources
+
+
+@pytest.mark.asyncio
+async def test_a_single_agent_run_is_unchanged_by_per_task_team_routing(settings, tmp_path):
+    """Non-manager runs still use whole-goal routing; no team.delegated, no per-task override."""
+    from omniagentos_starter.skills import builtin_pack
+
+    plan = {
+        "dod": [{"id": "p1", "criterion": "The deliverable answers the goal."}],
+        "tasks": [
+            {
+                "id": "t1",
+                "title": "Draft the reply",
+                "skill_id": "general-assistant",
+                "instruction": "do it",
+                "depends_on": [],
+            }
+        ],
+    }
+    script = Script(plan=plan)
+    orch = _orch(settings, script, tmp_path, [COPYWRITER, SUPPORT, STUDIO])
+    goal = (
+        "A customer is asking for a refund 38 days after purchase. Draft the reply, "
+        "grounded on our refund policy."
+    )
+    run = orch.create(goal, 1, [], agent_id="ava")
+    await orch.execute(run)
+
+    assert _events(run, "team.delegated") == []
+    selected = _events(run, "skill.selected")[0]["skill_ids"]
+    assert selected == ["refund-request-handler"], selected
+    assert not any(f.get("task_id") for f in _events(run, "skill.selection_fallback"))
+    tasks = _events(run, "planner.plan")[0]["tasks"]
+    assert tasks[0]["skill_id"] == "refund-request-handler"
+    assert not tasks[0].get("member")
+    prompt = script.prompt_text("worker")
+    refund = orch.library.by_id("refund-request-handler")
+    assert f"skill-sha256:{refund.sha256}" in prompt
+    assert f"skill-sha256:{builtin_pack().sha256}" not in prompt
 
 
 @pytest.mark.asyncio

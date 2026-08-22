@@ -400,6 +400,32 @@ class SkillLibrary:
             False,
         )
 
+    def best_match(
+        self, text: str, allowed: set[str] | None = None
+    ) -> tuple[SkillPack | None, float, bool]:
+        """The best pack for `text` among `allowed`, with the same bar `select` uses.
+
+        Returns ``(pack, score, below_floor)``.
+
+        * ``below_floor`` is False only when the pack cleared the match floor —
+          the same floor a goal must clear before its QUALITY CHECKS bind.
+        * ``below_floor`` True means nothing cleared it. ``pack`` is still the
+          highest-scoring pack (even at 0) so a caller can pick a "best-fitting"
+          owner without seeding that pack's checks. ``pack`` is None only when
+          the shelf is empty.
+
+        Scores use the whole library's IDF even when ``allowed`` is a short
+        shelf, matching :meth:`score`.
+        """
+        ranked = self.score(text, allowed=allowed)
+        if not ranked:
+            return None, 0.0, True
+        pack, score = ranked[0]
+        bar = self.MATCH_UNITS * self.decisive_word_weight()
+        if score < bar:
+            return pack, score, True
+        return pack, score, False
+
 
 _BUILTIN_CACHE: SkillPack | None = None
 
