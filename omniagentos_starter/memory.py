@@ -232,6 +232,14 @@ class Memory:
             for r in rows
         ]
 
+    def lesson_counts_by_agent(self) -> dict[str, int]:
+        """How much each agent has learned — what the roster card shows."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT agent_id, COUNT(*) AS n FROM lessons GROUP BY agent_id"
+            ).fetchall()
+        return {(r["agent_id"] or ""): int(r["n"]) for r in rows}
+
     def recall(
         self,
         goal: str,

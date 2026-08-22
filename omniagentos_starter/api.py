@@ -345,9 +345,17 @@ def create_app(settings: Settings | None = None, orchestrator: Orchestrator | No
     def _agent_error(exc: AgentError) -> JSONResponse:
         return JSONResponse(redact(exc.as_dict()), status_code=exc.status)
 
+    def _with_memory(body: dict) -> dict:
+        """Roster cards show how much each agent has actually learned."""
+        counts = orch.memory.lesson_counts_by_agent()
+        for item in body.get("agents") or []:
+            item["lessons"] = counts.get(item.get("id") or "", 0)
+        body["items"] = body["agents"]
+        return body
+
     @api.get("/agents")
     async def list_agents() -> JSONResponse:
-        return JSONResponse(redact(_reload_roster().as_dict()))
+        return JSONResponse(redact(_with_memory(_reload_roster().as_dict())))
 
     @api.get("/agents/{slug}")
     async def get_agent(slug: str) -> JSONResponse:
@@ -357,7 +365,9 @@ def create_app(settings: Settings | None = None, orchestrator: Orchestrator | No
                 {"error_tag": "AGENT_NOT_FOUND", "message": f"no agent {safe_agent_slug(slug)!r}"},
                 status_code=404,
             )
-        return JSONResponse(redact(agent.as_dict()))
+        body = agent.as_dict()
+        body["lessons"] = orch.memory.lesson_counts_by_agent().get(agent.slug, 0)
+        return JSONResponse(redact(body))
 
     @api.post("/agents")
     async def create_agent(request: Request) -> JSONResponse:

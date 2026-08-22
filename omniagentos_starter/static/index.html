@@ -54,6 +54,10 @@
   <section class="panel goal-panel">
     <label for="goal" class="label">Your goal</label>
     <textarea id="goal" data-testid="goal-input" rows="3" placeholder="Write exactly 3 ad headlines for an AI video tool, each under 40 characters, and explain in one line why each works"></textarea>
+    <label for="agent-picker" class="label label-sub">Assign to</label>
+    <select id="agent-picker" data-testid="agent-picker" class="sub-input">
+      <option value="">Let the router decide</option>
+    </select>
     <label for="extra-dod" class="label label-sub">Acceptance criteria (the Critic enforces these; the Worker doesn't see them)</label>
     <textarea id="extra-dod" data-testid="extra-dod-input" rows="2" class="sub-input"
       placeholder="One per line — e.g. Every headline is under 40 characters"></textarea>
@@ -80,6 +84,8 @@
          mismatch froze this header on "idle" for an entire live run. -->
     <article class="lane" id="lane-worker" data-lane="worker">
       <header><span class="lane-icon" aria-hidden="true">▤</span><h2>Workers</h2><span class="lane-status" data-status>○ idle</span></header>
+      <!-- Who is doing the work, on the lane that is doing it. -->
+      <div class="agent-chip" id="worker-agent" data-testid="worker-agent" hidden></div>
       <div class="lane-body" id="workers-body"><p class="muted">No tasks yet.</p></div>
     </article>
     <div class="arrow" aria-hidden="true">→<span class="token" id="token-2"></span></div>
@@ -103,6 +109,47 @@
   </section>
 
   <section id="critic-cards" class="critic-cards" aria-label="critic findings"></section>
+
+  <section class="panel agents-panel">
+    <div class="panel-head">
+      <h2><span aria-hidden="true">👤</span> Agents</h2>
+      <button id="agent-create" data-testid="agent-create" class="secondary" type="button">New agent</button>
+    </div>
+    <p class="muted">
+      Named workers you keep. Assign a goal to one and it becomes the Worker on the line —
+      its persona, its skills, its tools, and its own memory of what it learned last time.
+    </p>
+    <div id="agents-list" data-testid="agents-list" class="agents-list">
+      <p class="muted">Loading the roster…</p>
+    </div>
+
+    <form id="agent-form" class="agent-form" hidden>
+      <h3 id="agent-form-title">New agent</h3>
+      <label class="label label-sub" for="agent-name">Name</label>
+      <input id="agent-name" data-testid="agent-name" class="sub-input" type="text" placeholder="Riley" />
+      <label class="label label-sub" for="agent-title">Title</label>
+      <input id="agent-title" data-testid="agent-title" class="sub-input" type="text" placeholder="Meal-Prep Support" />
+      <label class="label label-sub" for="agent-persona">Persona</label>
+      <textarea id="agent-persona" data-testid="agent-persona" class="sub-input" rows="3"
+        placeholder="Two to four sentences: how this agent thinks, and what it always does."></textarea>
+      <label class="label label-sub" for="agent-body">Standing instructions</label>
+      <textarea id="agent-body" data-testid="agent-body" class="sub-input" rows="3"
+        placeholder="What this agent does on every job, whatever the goal is."></textarea>
+      <fieldset class="agent-fieldset">
+        <legend class="label label-sub">Skills</legend>
+        <div id="agent-skills" class="agent-choices"><p class="muted">Loading skills…</p></div>
+      </fieldset>
+      <fieldset class="agent-fieldset">
+        <legend class="label label-sub">Tools</legend>
+        <div id="agent-tools" class="agent-choices"></div>
+      </fieldset>
+      <div class="goal-actions">
+        <button id="agent-save" data-testid="agent-save" class="primary" type="submit">Save agent</button>
+        <button id="agent-cancel" class="secondary" type="button">Cancel</button>
+        <span id="agent-form-error" class="muted"></span>
+      </div>
+    </form>
+  </section>
 
   <section class="columns">
     <section class="panel">
@@ -135,6 +182,7 @@
   <span class="receipt-item">provider <b id="r-provider">–</b></span>
   <span class="receipt-item">model <b id="r-model">–</b></span>
   <span class="receipt-item">rounds <b id="r-rounds">–</b></span>
+  <span class="receipt-item">agent <b id="r-agent" data-testid="receipt-agent">–</b></span>
 </footer>
 
 <script src="/static/app.js"></script>

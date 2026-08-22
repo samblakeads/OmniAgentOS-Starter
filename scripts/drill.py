@@ -33,7 +33,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from omniagentos_starter.api import git_head  # noqa: E402
-from omniagentos_starter.config import VERSION, Settings, skills_dir  # noqa: E402
+from omniagentos_starter.config import VERSION, Settings, agents_dir, skills_dir  # noqa: E402
 from omniagentos_starter.redact import contains_secret, redact  # noqa: E402
 
 RECEIPT_MAGIC = "OMNIAGENTOS-RECEIPT-1"
@@ -96,6 +96,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--receipt", default=None, help="alias for --out")
     p.add_argument("--base-url", default=os.environ.get("OMNIAGENTOS_URL", "http://127.0.0.1:8486"))
     p.add_argument("--extra-dod", action="append", default=[], help="criterion added to the critic rubric only")
+    p.add_argument("--agent", default="", metavar="SLUG", help="hand the goal to a named agent from the roster")
     p.add_argument("--max-rounds", type=int, default=None)
     p.add_argument("--data-dir", default="var", help="data directory when running in-process")
     p.add_argument("--token", default=os.environ.get("OMNIAGENTOS_TOKEN", ""))
@@ -130,12 +131,18 @@ def drive_http(args, receipt: dict) -> tuple[list[dict], dict, str]:
             created = client.post("/api/demo")
         else:
             body: dict = {"goal": args.goal}
+            if args.agent:
+                body["agent_id"] = args.agent
             if args.extra_dod:
                 body["extra_dod"] = args.extra_dod
             if args.max_rounds:
                 body["max_rounds"] = args.max_rounds
             created = client.post("/api/runs", json=body)
         receipt["create_status"] = created.status_code
+        if created.status_code < 300:
+            created_body = created.json()
+            receipt["agent_id"] = created_body.get("agent_id") or ""
+            receipt["agent"] = created_body.get("agent")
         if created.status_code >= 300:
             receipt["status"] = "failed"
             receipt["error"] = redact(created.text)[:400]
@@ -184,6 +191,7 @@ async def _drive_in_process(args, receipt: dict) -> tuple[list[dict], dict, str]
     settings = Settings.from_env(data_dir=args.data_dir)
     orch = Orchestrator(settings)
     orch.load_library(skills_dir())
+    orch.load_roster(agents_dir())
 
     ok, error_tag, detail = await LLMClient(settings.provider).probe()
     receipt["health_json"] = {
@@ -202,8 +210,10 @@ async def _drive_in_process(args, receipt: dict) -> tuple[list[dict], dict, str]
     }
     receipt["mode"] = "in-process"
 
-    run = orch.create(args.goal, args.max_rounds, args.extra_dod)
+    run = orch.create(args.goal, args.max_rounds, args.extra_dod, agent_id=args.agent or None)
     receipt["run_id"] = run.id
+    receipt["agent_id"] = run.agent_id
+    receipt["agent"] = {"id": run.agent.slug, "name": run.agent.name} if run.agent else None
     receipt["create_status"] = 201
 
     t0 = time.monotonic()
@@ -243,6 +253,8 @@ def main(argv=None) -> int:
         "argv": scrub_argv(list(sys.argv)),
         "base_url": args.base_url.rstrip("/"),
         "goal": args.goal,
+        "agent_id": args.agent or "",
+        "agent": None,
         "started_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "roles_seen": [],
         "event_types": [],
@@ -339,6 +351,15 @@ def main(argv=None) -> int:
         problems.append("no terminal event arrived")
     if receipt.get("timed_out"):
         problems.append(f"wall-clock timeout after {args.timeout}s")
+    if args.agent:
+        assigned = [e for e in events if e.get("type") == "agent.assigned"]
+        if not assigned:
+            problems.append(f"no agent.assigned event for --agent {args.agent}")
+        elif assigned[0].get("agent_id") != args.agent:
+            problems.append(
+                f"agent.assigned names {assigned[0].get('agent_id')!r}, not {args.agent!r}"
+            )
+        receipt["agent_assigned"] = assigned[0] if assigned else None
     if not bool(summary.get("verified")):
         # `done` is not the same as signed off.
         problems.append("the run was not verified")
@@ -373,6 +394,7 @@ def finish(receipt: dict, out: str, code: int) -> int:
                     "mode",
                     "status",
                     "roles_seen",
+                    "agent_id",
                     "t_first_event_ms",
                     "t_first_llm_ms",
                     "t_done_ms",

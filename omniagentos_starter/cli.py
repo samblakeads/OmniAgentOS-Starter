@@ -17,7 +17,7 @@ import time
 import webbrowser
 from pathlib import Path
 
-from .config import VERSION, BindRefused, Settings, skills_dir, validate_bind
+from .config import VERSION, BindRefused, Settings, agents_dir, skills_dir, validate_bind
 from .engine import Orchestrator
 from .redact import ProviderError, redact
 from .replay import ReplayUnavailable, replay_into
@@ -47,7 +47,24 @@ def _parser() -> argparse.ArgumentParser:
         help="acceptance criterion the Critic enforces and the Worker never sees (repeatable)",
     )
     run.add_argument("--extra-dod", dest="extra_dod", action="append", help=argparse.SUPPRESS)
+    run.add_argument(
+        "--agent",
+        dest="agent",
+        default="",
+        metavar="SLUG",
+        help="hand this goal to a named agent from the roster (see `omniagentos agents list`)",
+    )
     run.add_argument("--json", action="store_true", help="print the run summary as JSON")
+
+    agents = sub.add_parser("agents", help="the agent roster")
+    agents_sub = agents.add_subparsers(dest="agents_command", required=True)
+    agents_list = agents_sub.add_parser("list", help="list every agent in the roster")
+    agents_list.add_argument("--data-dir", default="var")
+    agents_list.add_argument("--json", action="store_true")
+    agents_show = agents_sub.add_parser("show", help="show one agent in full")
+    agents_show.add_argument("slug")
+    agents_show.add_argument("--data-dir", default="var")
+    agents_show.add_argument("--json", action="store_true")
 
     demo = sub.add_parser("demo", help="replay a recorded run (no API key needed)")
     # NOT 8486. `omniagentos demo` starts its own server, and the one moment an
@@ -134,7 +151,16 @@ async def _run_goal(args) -> int:
     settings = Settings.from_env(data_dir=args.data_dir)
     orch = Orchestrator(settings)
     orch.load_library(skills_dir())
-    run = orch.create(args.goal, args.max_rounds, args.extra_dod)
+    orch.load_roster(agents_dir())
+    try:
+        run = orch.create(args.goal, args.max_rounds, args.extra_dod, agent_id=getattr(args, "agent", ""))
+    except ValueError as exc:
+        # A named agent that is not there is not a smaller version of what you
+        # asked for, so the run does not start.
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if run.agent is not None:
+        print(f"[agent] {run.agent.name} ({run.agent.slug})", file=sys.stderr)
     printed: dict[str, bool] = {}
 
     def echo(event: dict) -> None:
@@ -221,6 +247,50 @@ async def _demo_headless(args) -> int:
     return 1
 
 
+def _agents(args) -> int:
+    from .agents import load_agents
+    from .skills import load_skills
+
+    roster = load_agents(agents_dir(), library=load_skills(skills_dir()))
+    if args.agents_command == "list":
+        listed = roster.as_dict()["agents"]
+        if args.json:
+            print(json.dumps(redact(listed), indent=2, default=str))
+            return 0
+        if not listed:
+            print("no agents in the roster")
+            return 0
+        for agent in listed:
+            mark = "  " if agent["enabled"] else "✕ "
+            skills = ", ".join(agent["skills"]) or "router's choice"
+            builtin = " [built-in]" if agent["builtin"] else ""
+            print(f"{mark}{agent['id']:<24} {agent['name']}{builtin}")
+            print(f"  {'':<24} {agent['title'] or '-'} · skills: {skills}")
+            for problem in agent["errors"]:
+                print(f"  {'':<24} ! {problem}")
+        return 0
+
+    agent = roster.by_id(args.slug)
+    if agent is None:
+        print(f"error: no agent {args.slug!r} in {agents_dir()}", file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps(redact(agent.as_dict()), indent=2, default=str))
+        return 0
+    print(f"{agent.name} ({agent.slug})" + (" [built-in]" if agent.builtin else ""))
+    print(f"title:   {agent.title or '-'}")
+    chosen = ", ".join(agent.skills) or "router's choice"
+    print(f"skills:  {chosen}")
+    print(f"tools:   {', '.join(agent.tools) or '(none)'}")
+    print(f"memory:  {agent.memory_scope or agent.slug}")
+    print(f"enabled: {agent.enabled}")
+    for problem in agent.errors:
+        print(f"  ! {problem}")
+    print(f"\npersona:\n{agent.persona or '-'}")
+    print(f"\nstanding instructions:\n{agent.body or '-'}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     Path(args.data_dir).mkdir(parents=True, exist_ok=True)
@@ -228,6 +298,8 @@ def main(argv: list[str] | None = None) -> int:
         return _serve(args)
     if args.command == "run":
         return asyncio.run(_run_goal(args))
+    if args.command == "agents":
+        return _agents(args)
     if args.command == "demo":
         if args.headless:
             return asyncio.run(_demo_headless(args))

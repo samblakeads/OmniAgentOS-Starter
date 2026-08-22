@@ -11,15 +11,21 @@
     "plan.pruned", "planner.plan", "worker.started", "worker.delta", "worker.finished",
     "tool.write", "tool.error", "critic.verdict", "verdict.incomplete", "repair.dispatched",
     "verifier.verdict", "run.done", "run.failed", "lesson.saved", "llm.call",
-    "worker.reset", "skill.declined"
+    "worker.reset", "skill.declined", "agent.assigned", "skill.assigned_by_router"
   ];
+
+  /* The global tool allow-list, mirrored for the form's checkboxes. The server
+     validates every save against its own list — this is an affordance, not the
+     authority. */
+  var TOOL_NAMES = ["read_file", "write_file", "list_files"];
 
   var el = function (id) { return document.getElementById(id); };
   var state = {
     runId: null, source: null, goal: "", busySince: null, busyTimer: null,
     tasks: {}, cards: {}, dod: [], skills: {}, deliverable: "", files: [],
     calls: 0, tokens: 0, cost: 0, rounds: 0, health: null,
-    inflight: false, streamErrors: 0, token: "", replay: false
+    inflight: false, streamErrors: 0, token: "", replay: false,
+    agents: [], editing: null, agentMode: "create"
   };
 
   var MAX_STREAM_ERRORS = 5;
@@ -178,6 +184,186 @@
       el("skills-body").innerHTML =
         '<p class="muted">✕ INTERNAL_ERROR — the skill library could not be read.</p>';
     });
+  }
+
+  /* ------------------------------------------------------------- agents */
+  function loadAgents() {
+    return apiFetch("/api/agents").then(function (r) {
+      if (!r.ok) { throw new Error("HTTP " + r.status); }
+      return r.json();
+    }).then(function (data) {
+      state.agents = data.agents || [];
+      renderAgents();
+      fillAgentPicker();
+      return state.agents;
+    }).catch(function () {
+      el("agents-list").innerHTML =
+        '<p class="muted">✕ INTERNAL_ERROR — the agent roster could not be read.</p>';
+    });
+  }
+
+  function renderAgents() {
+    var host = el("agents-list");
+    if (!state.agents.length) {
+      host.innerHTML = '<p class="muted">No agents yet. Create one and hand it a goal.</p>';
+      return;
+    }
+    host.innerHTML = state.agents.map(function (a) {
+      var skills = (a.skills || []).length ? esc((a.skills || []).join(", ")) : "router's choice";
+      var lessons = typeof a.lessons === "number" ? a.lessons : 0;
+      // A disabled agent is SHOWN and says why. Hiding it would look exactly
+      // like nobody ever created it.
+      var broken = a.enabled === false
+        ? '<div class="agent-meta">✕ disabled — ' + esc((a.errors || []).join("; ")) + "</div>"
+        : "";
+      var actions = '<button type="button" class="link-button" data-agent-edit="' + esc(a.id) + '">edit</button>' +
+        '<button type="button" class="link-button" data-agent-duplicate="' + esc(a.id) + '">duplicate</button>' +
+        (a.builtin
+          ? '<span class="muted">built-in</span>'
+          : '<button type="button" class="link-button" data-agent-delete="' + esc(a.id) + '">delete</button>');
+      return '<article class="agent-card' + (a.enabled === false ? " disabled" : "") +
+        '" data-testid="agent-card" data-agent="' + esc(a.id) + '">' +
+        "<b>" + esc(a.name) + "</b>" +
+        '<span class="agent-role">' + esc(a.title || "") + "</span>" +
+        '<div class="agent-meta">🧩 ' + skills + "</div>" +
+        '<div class="agent-meta">🧠 ' + lessons + " lesson" + (lessons === 1 ? "" : "s") + " learned</div>" +
+        broken +
+        '<div class="agent-actions">' + actions + "</div>" +
+        "</article>";
+    }).join("");
+  }
+
+  function fillAgentPicker() {
+    var picker = el("agent-picker");
+    if (!picker) { return; }
+    var chosen = picker.value;
+    picker.innerHTML = '<option value="">Let the router decide</option>' +
+      state.agents.filter(function (a) { return a.enabled !== false; }).map(function (a) {
+        return '<option value="' + esc(a.id) + '">' + esc(a.name) +
+          (a.title ? " — " + esc(a.title) : "") + "</option>";
+      }).join("");
+    if (chosen) { picker.value = chosen; }
+  }
+
+  function agentById(slug) {
+    return state.agents.filter(function (a) { return a.id === slug; })[0] || null;
+  }
+
+  /* ------------------------------------------------------- the agent form */
+  function renderChoices(hostId, names, checked, testidPrefix) {
+    el(hostId).innerHTML = names.map(function (name) {
+      var id = hostId + "-" + name;
+      var on = checked.indexOf(name) !== -1 ? " checked" : "";
+      var testid = testidPrefix ? ' data-testid="' + testidPrefix + esc(name) + '"' : "";
+      return '<label for="' + esc(id) + '"><input type="checkbox" id="' + esc(id) + '"' + testid +
+        ' value="' + esc(name) + '"' + on + " /> " + esc(name) + "</label>";
+    }).join("");
+  }
+
+  function openAgentForm(agent, mode) {
+    state.editing = agent ? agent.id : null;
+    state.agentMode = mode || (agent ? "edit" : "create");
+    el("agent-form-title").textContent =
+      state.agentMode === "edit" ? "Edit agent" : state.agentMode === "duplicate" ? "Duplicate agent" : "New agent";
+    el("agent-name").value = agent ? (state.agentMode === "duplicate" ? agent.name + " copy" : agent.name) : "";
+    el("agent-title").value = agent ? agent.title || "" : "";
+    el("agent-persona").value = agent ? agent.persona || "" : "";
+    el("agent-body").value = agent ? agent.body || "" : "";
+    var skillNames = Object.keys(state.skills);
+    renderChoices("agent-skills", skillNames, agent ? agent.skills || [] : [], "agent-skill-");
+    renderChoices("agent-tools", TOOL_NAMES, agent ? agent.tools || TOOL_NAMES : TOOL_NAMES, "agent-tool-");
+    el("agent-form-error").textContent = "";
+    el("agent-form").hidden = false;
+    el("agent-name").focus();
+  }
+
+  function closeAgentForm() {
+    el("agent-form").hidden = true;
+    state.editing = null;
+  }
+
+  function checkedValues(hostId) {
+    var boxes = el(hostId).querySelectorAll("input[type=checkbox]");
+    return Array.prototype.filter.call(boxes, function (b) { return b.checked; })
+      .map(function (b) { return b.value; });
+  }
+
+  function saveAgent(event) {
+    if (event) { event.preventDefault(); }
+    var payload = {
+      name: el("agent-name").value.trim(),
+      title: el("agent-title").value.trim(),
+      persona: el("agent-persona").value.trim(),
+      body: el("agent-body").value.trim(),
+      skills: checkedValues("agent-skills"),
+      tools: checkedValues("agent-tools")
+    };
+    if (!payload.name) { el("agent-form-error").textContent = "an agent needs a name"; return; }
+    var editing = state.editing;
+    var mode = state.agentMode;
+    var request = mode === "edit"
+      ? apiFetch("/api/agents/" + encodeURIComponent(editing), {
+        method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload)
+      })
+      : apiFetch("/api/agents", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload)
+      });
+    el("agent-save").disabled = true;
+    request.then(function (r) {
+      return r.json().then(function (body) { return { ok: r.ok, body: body }; });
+    }).then(function (res) {
+      el("agent-save").disabled = false;
+      if (!res.ok) {
+        // The form says why, in place — an error banner across the page for a
+        // duplicate name is a jump-scare, not an explanation.
+        el("agent-form-error").textContent =
+          (res.body.error_tag || "BAD_REQUEST") + " — " + (res.body.message || "the agent was refused");
+        return;
+      }
+      closeAgentForm();
+      loadAgents().then(function () {
+        var picker = el("agent-picker");
+        if (picker && res.body.id) { picker.value = res.body.id; }
+      });
+    }).catch(function (err) {
+      el("agent-save").disabled = false;
+      el("agent-form-error").textContent = String(err);
+    });
+  }
+
+  function duplicateAgent(slug) {
+    var agent = agentById(slug);
+    if (agent) { openAgentForm(agent, "duplicate"); }
+  }
+
+  function deleteAgent(slug) {
+    apiFetch("/api/agents/" + encodeURIComponent(slug), { method: "DELETE" })
+      .then(function (r) {
+        return r.json().then(function (body) { return { ok: r.ok, body: body }; });
+      })
+      .then(function (res) {
+        if (!res.ok) {
+          showError(res.body.error_tag || "BAD_REQUEST", res.body.message || "the agent was not deleted");
+          return;
+        }
+        loadAgents();
+      })
+      .catch(function (err) { showError("INTERNAL_ERROR", String(err)); });
+  }
+
+  function showWorkerAgent(payload) {
+    var chip = el("worker-agent");
+    if (!chip) { return; }
+    if (!payload) {
+      chip.hidden = true;
+      chip.textContent = "";
+      el("r-agent").textContent = "–";
+      return;
+    }
+    var label = payload.name || payload.agent_id;
+    chip.textContent = "👤 " + label + (payload.title ? " · " + payload.title : "");
+    chip.hidden = false;
+    el("r-agent").textContent = label;
   }
 
   /* --------------------------------------------------------------- busy */
@@ -374,6 +560,11 @@
           (host.dataset.plan || "");
         break;
       }
+
+      case "agent.assigned":
+        showWorkerAgent(p);
+        el("run-id").textContent = (el("run-id").textContent || "") + " · @" + (p.agent_id || "");
+        break;
 
       case "skill.selection_fallback":
         el("chip-skills").textContent = "🧩 fallback pack: " + (p.skill_id || "general-assistant");
@@ -644,6 +835,7 @@
     el("workers-body").innerHTML = '<p class="muted">No tasks yet.</p>';
     el("dod-list").innerHTML = '<li class="muted">The Definition of Done appears once the Planner has run.</li>';
     highlightSkills([]);
+    showWorkerAgent(null);
     renderFiles();
     LANES.forEach(function (l) { laneStatus(l, "\u25cb idle", null); });
   }
@@ -680,6 +872,10 @@
     var body = { goal: goal };
     var criteria = extraDod();
     if (criteria.length) { body.extra_dod = criteria; }
+    var picker = el("agent-picker");
+    // An explicit pick wins over an @slug prefix; the server honours the same
+    // precedence, so the two cannot disagree.
+    if (picker && picker.value) { body.agent_id = picker.value; }
     apiFetch("/api/runs", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -728,13 +924,24 @@
   el("retry-button").addEventListener("click", startRun);
   el("demo-button").addEventListener("click", startDemo);
   el("error-dismiss").addEventListener("click", function () { el("error-banner").hidden = true; });
+  el("agent-create").addEventListener("click", function () { openAgentForm(null, "create"); });
+  el("agent-cancel").addEventListener("click", closeAgentForm);
+  el("agent-form").addEventListener("submit", saveAgent);
+  el("agents-list").addEventListener("click", function (e) {
+    var edit = e.target.getAttribute("data-agent-edit");
+    var dup = e.target.getAttribute("data-agent-duplicate");
+    var del = e.target.getAttribute("data-agent-delete");
+    if (edit) { openAgentForm(agentById(edit), "edit"); }
+    if (dup) { duplicateAgent(dup); }
+    if (del) { deleteAgent(del); }
+  });
   el("goal").addEventListener("keydown", function (e) {
     if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { startRun(); }
   });
 
   bootstrapToken().then(function () {
-    loadSkills();
-    return loadHealth();
+    // Skills first: the agent form's multi-select is built from the library.
+    return loadSkills().then(loadAgents).then(loadHealth);
   }).then(function () {
     var params = new URLSearchParams(window.location.search);
     if (params.get("demo") === "1") { startDemo(); }

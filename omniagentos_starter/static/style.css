@@ -170,3 +170,25 @@ textarea {
 /* A selected skill is named as well as tinted: status is never colour-only. */
 .skill.selected { border-left: 3px solid var(--ok); padding-left: 8px; }
 .skill .skill-mark { color: var(--ok); font-weight: 700; }
+
+/* --------------------------------------------------------------- agents */
+.agents-panel { margin-top: 18px; }
+.panel-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.agents-list { display: flex; flex-wrap: wrap; gap: 12px; margin: 10px 0 0; }
+.agent-card {
+  border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px;
+  min-width: 220px; flex: 1 1 220px; font-size: 16px;
+}
+.agent-card.disabled { border-color: var(--fail); }
+.agent-card b { display: block; }
+.agent-card .agent-role { color: var(--muted); }
+.agent-card .agent-meta { color: var(--muted); font-size: 16px; margin-top: 6px; }
+.agent-card .agent-actions { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+.agent-form { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 12px; }
+.agent-fieldset { border: 1px solid var(--line); border-radius: 8px; margin: 10px 0; padding: 8px 12px; }
+.agent-choices { display: flex; flex-wrap: wrap; gap: 10px; }
+.agent-choices label { font-size: 16px; display: inline-flex; align-items: center; gap: 6px; }
+.agent-chip {
+  margin: 0 10px 8px; padding: 4px 8px; border: 1px solid var(--ok); border-radius: 999px;
+  font-size: 16px; display: inline-block;
+}
