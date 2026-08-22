@@ -210,23 +210,32 @@ class BindRefused(Exception):
     """Raised when a non-loopback bind is attempted without a token."""
 
 
+# The wildcard forms. An empty host is the trap: `socket.bind(("", port))` and
+# uvicorn `host=""` both mean EVERY interface, so classifying "" as loopback
+# hands the LAN a live provider key with no token in front of it.
+UNSPECIFIED_HOSTS = {"", "*", "0.0.0.0", "::", "[::]", "0", "::0", "0.0.0.0.0"}
+
+
 def _is_loopback(host: str) -> bool:
-    h = (host or "").strip().lower()
-    if h in {"localhost", "localhost.localdomain", ""}:
+    h = (host or "").strip().lower().strip("[]")
+    if h in {"localhost", "localhost.localdomain"}:
         return True
+    if h in UNSPECIFIED_HOSTS or (host or "").strip() in UNSPECIFIED_HOSTS:
+        return False
     try:
-        return ipaddress.ip_address(h).is_loopback
+        addr = ipaddress.ip_address(h)
     except ValueError:
         return False
+    return addr.is_loopback and not addr.is_unspecified
 
 
-def validate_bind(host: str, env: dict | None = None) -> None:
+def validate_bind(host: str, env: dict | None = None, token: str = "") -> None:
     """Fail closed: exposing the API off-loopback requires OMNIAGENTOS_TOKEN."""
     if _is_loopback(host):
         return
-    if not _env(env, "OMNIAGENTOS_TOKEN"):
+    if not (token or "").strip() and not _env(env, "OMNIAGENTOS_TOKEN"):
         raise BindRefused(
-            f"refusing to bind {host}: set OMNIAGENTOS_TOKEN to expose the API off-loopback "
+            f"refusing to bind {host!r}: set OMNIAGENTOS_TOKEN to expose the API off-loopback "
             "(every /api/* request must then carry Authorization: Bearer <token>)"
         )
 
@@ -244,6 +253,14 @@ class Settings:
     token: str = ""
     max_rounds: int = MAX_ROUNDS
 
+    def __post_init__(self) -> None:
+        # from_env() is not the only way a Settings gets built — create_app() and
+        # every test fixture construct one directly, and each of those bypassed
+        # the bind policy entirely. The check belongs to the object, not to one
+        # constructor.
+        self.host = (self.host or "").strip()
+        validate_bind(self.host, token=self.token)
+
     @classmethod
     def from_env(
         cls,
@@ -252,7 +269,8 @@ class Settings:
         port: int = 8486,
         data_dir: str | Path | None = None,
     ) -> Settings:
-        validate_bind(host, env)
+        token = _env(env, "OMNIAGENTOS_TOKEN")
+        validate_bind(host, env, token=token)
         data = Path(data_dir).expanduser().resolve() if data_dir else (Path.cwd() / "var").resolve()
         return cls(
             host=host,
@@ -261,5 +279,5 @@ class Settings:
             workspace_dir=(Path.cwd() / "workspace").resolve(),
             provider=resolve_provider(env),
             brand=resolve_brand(env),
-            token=_env(env, "OMNIAGENTOS_TOKEN"),
+            token=token,
         )

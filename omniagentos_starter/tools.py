@@ -8,7 +8,9 @@ the package directory or the data directory refuses to exist at all.
 
 from __future__ import annotations
 
+import errno
 import os
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -19,6 +21,12 @@ MAX_FILE_BYTES = 256 * 1024
 MAX_FILES_PER_RUN = 50
 MAX_REL_LEN = 255
 MAX_DEPTH = 8
+
+# What the kernel says when O_NOFOLLOW meets a symlink: ELOOP on Linux, EMLINK on
+# some BSDs, EFTYPE on others.
+_SYMLINK_ERRNOS = {
+    getattr(errno, name) for name in ("ELOOP", "EMLINK", "EFTYPE") if hasattr(errno, name)
+}
 
 
 class WorkspaceRefused(Exception):
@@ -143,14 +151,40 @@ class WorkspaceGuard:
         if len(self.list_files()) >= MAX_FILES_PER_RUN and not path.exists():
             raise WorkspaceEscape(rel, f"more than {MAX_FILES_PER_RUN} files in one run")
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(data)
+        # resolve() checked every component for a symlink, but that check and this
+        # open are two moments in time. O_NOFOLLOW closes the gap: if the final
+        # component became a symlink in between, the open itself refuses.
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(path, flags, 0o600)
+        except OSError as exc:
+            if getattr(exc, "errno", None) in _SYMLINK_ERRNOS:
+                raise WorkspaceEscape(rel, "symlinked path component") from None
+            raise
+        try:
+            os.write(fd, data)
+        finally:
+            os.close(fd)
         return {"path": self.relpath(path), "bytes": len(data)}
 
     def read_file(self, rel: str) -> str:
         path = self.resolve(rel)
-        if not path.is_file():
-            raise FileNotFoundError(rel)
-        return path.read_text(encoding="utf-8", errors="replace")[:MAX_FILE_BYTES]
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(path, flags)
+        except FileNotFoundError:
+            raise FileNotFoundError(rel) from None
+        except OSError as exc:
+            if getattr(exc, "errno", None) in _SYMLINK_ERRNOS:
+                raise WorkspaceEscape(rel, "symlinked path component") from None
+            raise
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise FileNotFoundError(rel)
+            data = os.read(fd, MAX_FILE_BYTES)
+        finally:
+            os.close(fd)
+        return data.decode("utf-8", errors="replace")
 
     def list_files(self) -> list[dict]:
         out: list[dict] = []
@@ -191,8 +225,16 @@ def runs_root(workspace_dir: Path | str) -> Path:
     return (Path(workspace_dir) / "runs").resolve()
 
 
-def workspace_for_run(workspace_dir: Path | str, run_id: str, data_dir: Path | str | None = None) -> WorkspaceGuard:
-    """Default per-run root: ``./workspace/runs/<run_id>/``."""
+def workspace_for_run(
+    workspace_dir: Path | str, run_id: str, data_dir: Path | str | None | _Unset = UNSET
+) -> WorkspaceGuard:
+    """Default per-run root: ``./workspace/runs/<run_id>/``.
+
+    ``data_dir`` has no default value on purpose. A caller that simply forgot the
+    argument used to get a guard that did not know where the database lives and
+    would therefore not refuse to write into it — the omission failed OPEN. Pass
+    an explicit ``None`` to say there is genuinely no data directory in play.
+    """
     safe_id = safe_run_id(run_id)
     if not safe_id:
         raise WorkspaceRefused("run id has no safe characters")

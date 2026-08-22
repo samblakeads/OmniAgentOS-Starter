@@ -11,6 +11,7 @@ from __future__ import annotations
 import json as _json
 import os
 import re
+from pathlib import Path
 
 from .config import SECRET_ENV_VARS
 
@@ -29,7 +30,9 @@ _SHAPE_PATTERNS = [
 # Values are never logged, only matched.
 _REGISTERED: set[str] = set()
 
-_MIN_SECRET_LEN = 8
+# Short enough that a hand-typed OMNIAGENTOS_TOKEN is still substituted. A token
+# nobody redacts because it is "too short to be a secret" is still a token.
+_MIN_SECRET_LEN = 4
 
 
 def register_secret(value: str | None) -> None:
@@ -66,9 +69,17 @@ def redact(value):
     """Redact a str / dict / list / tuple recursively. Other types pass through.
 
     Dict keys are redacted too: a secret can end up as a key in a parsed body.
+    ``Path`` and ``bytes`` are coerced to redacted strings rather than passed
+    through, because ``json.dumps(..., default=str)`` downstream would stringify
+    them *after* the last redaction ran — which is how an unredacted value leaves
+    a process that believes it redacts everything.
     """
     if isinstance(value, str):
         return redact_text(value)
+    if isinstance(value, Path):
+        return redact_text(str(value))
+    if isinstance(value, (bytes, bytearray)):
+        return redact_text(bytes(value).decode("utf-8", "replace"))
     if isinstance(value, dict):
         return {redact(k) if isinstance(k, str) else k: redact(v) for k, v in value.items()}
     if isinstance(value, list):
@@ -79,9 +90,16 @@ def redact(value):
 
 
 def contains_secret(value) -> bool:
-    """True if any known secret survives in `value` — used by tests and receipts."""
+    """True if a secret survives in `value` — used by tests and by receipts.
+
+    Both halves of the redactor are applied: the registered/env values AND the
+    shape patterns. A receipt gate that only knew the named secrets happily
+    published a bearer token that arrived on the command line.
+    """
     blob = value if isinstance(value, str) else _json.dumps(value, default=str)
-    return any(secret in blob for secret in _known_secrets())
+    if any(secret in blob for secret in _known_secrets()):
+        return True
+    return any(pat.search(blob) for pat in _SHAPE_PATTERNS)
 
 
 class ProviderError(Exception):

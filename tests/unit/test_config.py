@@ -55,15 +55,24 @@ def test_redacted_dict_never_carries_the_key():
 
 
 def test_loopback_binds_need_no_token():
-    for host in ("127.0.0.1", "localhost", "::1", ""):
+    for host in ("127.0.0.1", "localhost", "::1"):
         config.validate_bind(host, {})
 
 
 def test_public_bind_without_a_token_is_refused():
+    # "" is the trap: socket.bind(("", port)) and uvicorn host="" both mean EVERY
+    # interface, so an empty host is a wildcard bind, never loopback.
+    for host in ("0.0.0.0", "192.168.1.20", "", "::", "*"):
+        with pytest.raises(config.BindRefused):
+            config.validate_bind(host, {})
+
+
+def test_a_settings_built_by_hand_is_still_bound_by_the_bind_policy():
     with pytest.raises(config.BindRefused):
-        config.validate_bind("0.0.0.0", {})
+        config.Settings(host="0.0.0.0")
     with pytest.raises(config.BindRefused):
-        config.validate_bind("192.168.1.20", {})
+        config.Settings(host="")
+    config.Settings(host="0.0.0.0", token="t0ken")
 
 
 def test_public_bind_with_a_token_is_allowed():

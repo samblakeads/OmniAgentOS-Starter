@@ -173,7 +173,12 @@ class EventBus:
         self.events: list[dict] = []
         self._subs: set[asyncio.Queue] = set()
         self._next_id = 1
+        # `done` means "the terminal event has been emitted"; `closed` means "no
+        # further event will ever arrive". A replay keeps talking between the two
+        # (the lesson it saved is the last thing on the tape), so a stream that
+        # wants everything has to wait for `closed`, not for `done`.
         self.done = False
+        self.closed = False
 
     def emit(self, etype: str, payload: dict | None = None) -> dict:
         event = {
@@ -210,6 +215,7 @@ class EventBus:
 
     def close(self) -> None:
         self.done = True
+        self.closed = True
         for q in list(self._subs):
             q.put_nowait(None)
 

@@ -10,17 +10,19 @@ and it never contains a fragment of a key.
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import os
 import time
 from pathlib import Path
 
 from fastapi import APIRouter, FastAPI, Header, Query, Request
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
 from .config import (
+    MAX_ARTIFACT_CHARS,
     MAX_EXTRA_DOD,
     MAX_GOAL_CHARS,
     REPO_ROOT,
@@ -33,11 +35,16 @@ from .config import (
 )
 from .engine import EventBus, Orchestrator, RunLimit, RunState
 from .llm import LLMClient
-from .redact import redact
+from .redact import redact, register_secret
 from .replay import ReplayUnavailable, replay_into, replay_metadata
 from .tools import WorkspaceGuard, runs_root, safe_run_id
 
 PROBE_TTL_SECONDS = 600
+# A failed probe is cached far more briefly than a successful one. Ten minutes of
+# "provider unreachable" after a Wi-Fi blip is ten minutes of a red dashboard in
+# front of an audience, with a provider that came back thirty seconds in.
+PROBE_FAILURE_TTL_SECONDS = 20
+SESSION_COOKIE = "omniagentos_session"
 
 
 def run_workspace_dir(workspace_dir: Path | str, run_id: str) -> Path | None:
@@ -136,7 +143,8 @@ class ProbeCache:
 
     async def get(self, force: bool = False) -> dict:
         async with self._lock:
-            fresh = (time.time() - self.checked_ts) < PROBE_TTL_SECONDS
+            ttl = PROBE_TTL_SECONDS if self.ok else PROBE_FAILURE_TTL_SECONDS
+            fresh = (time.time() - self.checked_ts) < ttl
             if not force and fresh:
                 return self.as_dict()
             client = LLMClient(self.settings.provider, transport=self.transport)
@@ -175,10 +183,13 @@ def sse_data(event: dict) -> dict:
 
 
 def _sse(event: dict) -> str:
+    # The last hop to the browser. `default=str` below stringifies Paths and
+    # exceptions AFTER any earlier redaction ran, so the redaction has to happen
+    # here, on the object that is actually about to be serialised.
     return (
         f"id: {event['id']}\n"
         f"event: {event['type']}\n"
-        f"data: {json.dumps(sse_data(event), default=str)}\n\n"
+        f"data: {json.dumps(redact(sse_data(event)), default=str)}\n\n"
     )
 
 
@@ -194,13 +205,38 @@ def create_app(settings: Settings | None = None, orchestrator: Orchestrator | No
     app.state.probe = probe
     api = APIRouter(prefix="/api")
 
+    def _token_ok(candidate: str | None) -> bool:
+        return bool(candidate) and hmac.compare_digest(str(candidate), settings.token)
+
+    def _authorised(request: Request) -> bool:
+        """Three ways to present the bind token, for three kinds of client.
+
+        The header is the one an API client uses. The browser cannot set a header
+        on an EventSource at all, so it exchanges the token once at /api/session
+        for a same-origin cookie — which then rides along on the SSE connection
+        and on the file-tree links. The `token=` query parameter is the
+        last-resort channel for a hand-driven `curl` against the stream; it is
+        accepted only on the events route, never on anything that mutates state.
+        """
+        header = request.headers.get("authorization", "")
+        if header.startswith("Bearer ") and _token_ok(header[7:]):
+            return True
+        if _token_ok(request.cookies.get(SESSION_COOKIE)):
+            return True
+        if request.url.path.endswith("/events") and _token_ok(request.query_params.get("token")):
+            return True
+        return False
+
     @app.middleware("http")
     async def auth_and_redaction(request: Request, call_next):
-        if settings.token and request.url.path.startswith("/api/"):
-            supplied = request.headers.get("authorization", "")
-            if supplied != f"Bearer {settings.token}":
+        path = request.url.path
+        if settings.token and path.startswith("/api/") and path != "/api/session":
+            if not _authorised(request):
+                # Its own tag: this is the bind token in front of the dashboard,
+                # not the provider key. Reusing PROVIDER_AUTH sent the operator
+                # hunting for an xAI problem that did not exist.
                 return JSONResponse(
-                    {"error_tag": "PROVIDER_AUTH", "message": "missing or invalid bearer token"}, status_code=401
+                    {"error_tag": "APP_AUTH", "message": "missing or invalid access token"}, status_code=401
                 )
         try:
             return await call_next(request)
@@ -211,12 +247,53 @@ def create_app(settings: Settings | None = None, orchestrator: Orchestrator | No
 
     @app.on_event("startup")
     async def _startup() -> None:
+        # Teach the redactor about the secrets this process holds in memory, not
+        # only the ones still visible in os.environ: a parent that cleared the
+        # environment after start would otherwise disable redaction entirely.
+        register_secret(settings.provider.api_key)
+        register_secret(settings.token)
         asyncio.create_task(probe.get(force=True))
+
+    @api.post("/session")
+    async def session(request: Request) -> Response:
+        """Exchange the bind token for a same-origin cookie the browser can use."""
+        if not settings.token:
+            return JSONResponse({"ok": True, "token_required": False})
+        supplied = ""
+        header = request.headers.get("authorization", "")
+        if header.startswith("Bearer "):
+            supplied = header[7:]
+        if not supplied:
+            try:
+                body = await request.json()
+                supplied = str((body or {}).get("token") or "")
+            except Exception:
+                supplied = ""
+        if not _token_ok(supplied):
+            return JSONResponse(
+                {"error_tag": "APP_AUTH", "message": "missing or invalid access token"}, status_code=401
+            )
+        response = JSONResponse({"ok": True, "token_required": True})
+        response.set_cookie(
+            SESSION_COOKIE,
+            settings.token,
+            httponly=True,
+            samesite="strict",
+            path="/",
+            max_age=12 * 3600,
+        )
+        return response
 
     # ------------------------------------------------------------------ meta
     @api.get("/health")
-    async def health(nonce: str | None = Query(default=None, max_length=64)) -> JSONResponse:
-        state = await probe.get()
+    async def health(
+        nonce: str | None = Query(default=None, max_length=64),
+        fresh: int | None = Query(default=None),
+    ) -> JSONResponse:
+        # `?fresh=1` re-probes now. The negative cache is deliberately short, but
+        # an operator who has just fixed the network should not have to wait for
+        # it at all.
+        state = await probe.get(force=bool(fresh))
         lib = orch.library
         body = {
             "status": "ok",
@@ -233,6 +310,10 @@ def create_app(settings: Settings | None = None, orchestrator: Orchestrator | No
             "max_rounds": settings.max_rounds,
         }
         if not state["configured"]:
+            # `status: ok` next to `configured: false` is the healthy twin of a
+            # working provider, and every client that keys off `status` believed
+            # it. The top-level word now says the same thing the flag does.
+            body["status"] = "degraded"
             body["error_tag"] = state["error_tag"] or "PROVIDER_NOT_CONFIGURED"
             body["message"] = state["detail"] or "no reachable provider"
         if nonce is not None:
@@ -256,34 +337,46 @@ def create_app(settings: Settings | None = None, orchestrator: Orchestrator | No
         try:
             run = orch.create(req.goal, req.max_rounds, req.criteria())
         except RunLimit as exc:
-            return JSONResponse({"error_tag": "RUN_LIMIT", "message": str(exc)}, status_code=429)
+            return JSONResponse(redact({"error_tag": "RUN_LIMIT", "message": str(exc)}), status_code=429)
         except ValueError as exc:
-            return JSONResponse({"error_tag": "BAD_REQUEST", "message": str(exc)}, status_code=400)
+            return JSONResponse(redact({"error_tag": "BAD_REQUEST", "message": str(exc)}), status_code=400)
         orch.start(run)
-        return JSONResponse({"run_id": run.id, "status": run.status, "goal": run.goal}, status_code=201)
+        # The goal is echoed back, and a goal is whatever the operator pasted —
+        # including, on a bad day, the curl command with the key still in it.
+        return JSONResponse(
+            redact({"run_id": run.id, "status": run.status, "goal": run.goal}), status_code=201
+        )
 
     @api.post("/demo")
     async def demo() -> JSONResponse:
         meta = replay_metadata()
         if not meta.get("available"):
             return JSONResponse(
-                {"error_tag": "PROVIDER_NOT_CONFIGURED", "message": meta.get("reason", "no recorded run")},
+                redact({"error_tag": "PROVIDER_NOT_CONFIGURED", "message": meta.get("reason", "no recorded run")}),
                 status_code=503,
             )
         try:
             run = orch.create(meta.get("goal") or "recorded demonstration run")
         except RunLimit as exc:
-            return JSONResponse({"error_tag": "RUN_LIMIT", "message": str(exc)}, status_code=429)
+            return JSONResponse(redact({"error_tag": "RUN_LIMIT", "message": str(exc)}), status_code=429)
         run.replay = True
         run.task = asyncio.create_task(_run_replay(run))
-        return JSONResponse({"run_id": run.id, "status": "running", "replay": True, "goal": run.goal}, status_code=201)
+        return JSONResponse(
+            redact({"run_id": run.id, "status": run.status, "replay": True, "goal": run.goal}), status_code=201
+        )
 
     async def _run_replay(run: RunState) -> None:
         # Whatever goes wrong in here, the run must end. A background task that
         # dies quietly leaves its run "running" for ever, and two of those are
         # every concurrency slot the server has.
+        # A fallback bus that is not written back onto the run is a bus nobody
+        # can subscribe to: the SSE route would look at `run.bus is None`, take
+        # the stored-events branch, and stream a recording that is still playing
+        # somewhere else.
+        if run.bus is None:
+            run.bus = EventBus(run.id, orch.memory)
         try:
-            await replay_into(run.bus or EventBus(run.id, orch.memory), run)
+            await replay_into(run.bus, run)
         except Exception as exc:
             run.status = "failed"
             run.error_tag = (
@@ -361,6 +454,11 @@ def create_app(settings: Settings | None = None, orchestrator: Orchestrator | No
 
         bus = run.bus
         queue, backlog = bus.subscribe(last_id)
+        # A recorded run keeps emitting after run.done — the lesson it saved is
+        # the last thing on the tape. Cutting the stream at the terminal event
+        # means the Memory column never fills during the canned demo, so a replay
+        # runs until the bus itself closes.
+        stop_at_terminal = not run.replay
 
         async def stream():
             seen = last_id
@@ -369,9 +467,13 @@ def create_app(settings: Settings | None = None, orchestrator: Orchestrator | No
                 for event in backlog:
                     seen = event["id"]
                     yield _sse(event)
-                    if event["type"] in ("run.done", "run.failed"):
+                    if event["type"] in ("run.done", "run.failed") and stop_at_terminal:
                         terminal = True
                         break
+                if bus.closed:
+                    # Nothing more will ever arrive: a reconnect that waited on
+                    # the queue here would hang until the client gave up.
+                    terminal = True
                 if not terminal:
                     while True:
                         try:
@@ -385,7 +487,7 @@ def create_app(settings: Settings | None = None, orchestrator: Orchestrator | No
                             continue
                         seen = event["id"]
                         yield _sse(event)
-                        if event["type"] in ("run.done", "run.failed"):
+                        if event["type"] in ("run.done", "run.failed") and stop_at_terminal:
                             break
             finally:
                 bus.unsubscribe(queue)
@@ -414,7 +516,7 @@ def create_app(settings: Settings | None = None, orchestrator: Orchestrator | No
             # nothing" and "that is not a run id" — and the second one is an
             # attempt to read somewhere it should not.
             return JSONResponse({"error_tag": "BAD_REQUEST", "message": "unknown run"}, status_code=404)
-        return JSONResponse({"run_id": run_id, "files": guard.list_files()})
+        return JSONResponse(redact({"run_id": run_id, "files": guard.list_files()}))
 
     @api.get("/runs/{run_id}/files/{file_path:path}")
     async def run_file(run_id: str, file_path: str):
@@ -422,12 +524,17 @@ def create_app(settings: Settings | None = None, orchestrator: Orchestrator | No
         if guard is None:
             return JSONResponse({"error_tag": "BAD_REQUEST", "message": "unknown run"}, status_code=404)
         try:
-            return PlainTextResponse(guard.read_file(file_path))
+            # A worker wrote this file, from text a user supplied. It is opened in
+            # a browser tab on a projector, so it goes through the redactor like
+            # every other thing this process hands to a client.
+            body = redact(guard.read_file(file_path))[:MAX_ARTIFACT_CHARS]
+            return PlainTextResponse(body, media_type="text/plain; charset=utf-8")
         except FileNotFoundError:
             return JSONResponse({"error_tag": "BAD_REQUEST", "message": "no such file"}, status_code=404)
         except Exception as exc:
             return JSONResponse(
-                {"error_tag": getattr(exc, "error_tag", "BAD_REQUEST"), "message": redact(str(exc))}, status_code=400
+                redact({"error_tag": getattr(exc, "error_tag", "BAD_REQUEST"), "message": str(exc)}),
+                status_code=400,
             )
 
     app.include_router(api)
