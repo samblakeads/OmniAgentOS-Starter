@@ -1,0 +1,15 @@
+# mission/ops state never ships
+devtasks/
+.fusion/
+# runtime
+var/
+workspace/
+.env
+*.sqlite3
+*.sqlite3-*
+.venv/
+__pycache__/
+*.pyc
+evidence/live-receipts/*.json
+.pytest_cache/
+node_modules/
