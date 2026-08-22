@@ -1,0 +1,16 @@
+FAIL D1
+FAIL D2
+FAIL D3
+FAIL D4
+FAIL D5
+FAIL D6
+FAIL D7
+PASS D8
+FAIL D9
+FAIL D10
+FAIL D11
+FAIL D12
+FAIL D13
+FAIL D14
+----- dod.sh exit=1 -----
+8845788cb2232fd00f88ed9dbdaaccac375f175d6cae515112ed8f23eccaebb2  /Users/samsbmedia/OSS/OmniAgentOS-Lite/devtasks/gomax-omniagentos-lite-0821/dod.sh
