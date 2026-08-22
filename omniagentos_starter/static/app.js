@@ -11,7 +11,8 @@
     "plan.pruned", "planner.plan", "worker.started", "worker.delta", "worker.finished",
     "tool.write", "tool.error", "critic.verdict", "verdict.incomplete", "repair.dispatched",
     "verifier.verdict", "run.done", "run.failed", "lesson.saved", "llm.call",
-    "worker.reset", "skill.declined", "agent.assigned", "skill.assigned_by_router"
+    "worker.reset", "skill.declined", "agent.assigned", "skill.assigned_by_router",
+    "team.delegated", "agent.skills_unrestricted"
   ];
 
   /* The global tool allow-list, mirrored for the form's checkboxes. The server
@@ -25,7 +26,8 @@
     tasks: {}, cards: {}, dod: [], skills: {}, deliverable: "", files: [],
     calls: 0, tokens: 0, cost: 0, rounds: 0, health: null,
     inflight: false, streamErrors: 0, token: "", replay: false,
-    agents: [], editing: null, agentMode: "create", agentsGeneration: 0
+    agents: [], editing: null, agentMode: "create", agentsGeneration: 0,
+    delegations: {}, managerName: ""
   };
 
   var MAX_STREAM_ERRORS = 5;
@@ -225,6 +227,13 @@
         ? esc((a.skills || []).join(", "))
         : "no skills declared · the router may choose from the whole library";
       var lessons = typeof a.lessons === "number" ? a.lessons : 0;
+      // A manager is shown by WHO it manages, by name. A list of slugs is a
+      // database table, not a team.
+      var team = (a.team_members || []).length
+        ? '<div class="agent-meta agent-team">👥 manages ' +
+          (a.team_members || []).map(function (m) { return esc(m.name || m.id); }).join(", ") +
+          "</div>"
+        : "";
       // A disabled agent is SHOWN and says why. Hiding it would look exactly
       // like nobody ever created it.
       // A disabled card names its FILE as well as its reason: two cards can
@@ -249,6 +258,7 @@
         "<b>" + esc(a.name) + "</b>" +
         '<span class="agent-role">' + esc(a.title || "") + "</span>" +
         '<div class="agent-meta">🧩 ' + skills + "</div>" +
+        team +
         '<div class="agent-meta">🧠 ' + lessons + " lesson" + (lessons === 1 ? "" : "s") + " learned</div>" +
         broken +
         '<div class="agent-actions">' + actions + "</div>" +
@@ -345,6 +355,19 @@
     var skillNames = Object.keys(state.skills);
     renderChoices("agent-skills", skillNames, agent ? agent.skills || [] : [], "agent-skill-");
     renderChoices("agent-tools", TOOL_NAMES, agent ? agent.tools || TOOL_NAMES : TOOL_NAMES, "agent-tool-");
+    // An agent may never be on its own team, so it is not offered as an option —
+    // the rule is enforced server-side, but a checkbox you can tick and that is
+    // then refused is a worse way to learn it.
+    var editing = state.agentMode === "edit" && agent ? agent.id : null;
+    var candidates = state.agents
+      .filter(function (a) { return a.id !== editing && a.enabled !== false; })
+      .map(function (a) { return a.id; });
+    if (candidates.length) {
+      renderChoices("agent-team", candidates, agent ? agent.team || [] : [], "agent-team-");
+    } else {
+      el("agent-team").innerHTML =
+        '<p class="muted">Create another agent first — a manager needs somebody to manage.</p>';
+    }
     el("agent-form-error").textContent = "";
     el("agent-form").hidden = false;
     el("agent-name").focus();
@@ -369,7 +392,8 @@
       persona: el("agent-persona").value.trim(),
       body: el("agent-body").value.trim(),
       skills: checkedValues("agent-skills"),
-      tools: checkedValues("agent-tools")
+      tools: checkedValues("agent-tools"),
+      team: checkedValues("agent-team")
     };
     if (!payload.name) { el("agent-form-error").textContent = "an agent needs a name"; return; }
     var editing = state.editing;
@@ -550,7 +574,13 @@
       var t = state.tasks[id];
       var mark = t.status === "done" ? "✓" : t.status === "running" ? "●" : "○";
       var files = (t.files && t.files.length) ? " · " + t.files.length + " file(s)" : "";
+      var delegated = state.delegations[id];
+      var who = delegated
+        ? '<div class="task-member" data-testid="task-member">👤 ' +
+          esc(delegated.member_name || delegated.member) + "</div>"
+        : "";
       return '<div class="task"><div class="task-title">' + mark + " " + esc(t.title || id) + "</div>" +
+        who +
         '<div class="task-skill">' + esc(t.skill_id || "") + " · " + esc(t.status) + files + "</div></div>";
     }).join("");
   }
@@ -641,7 +671,22 @@
         break;
       }
 
+      case "team.delegated": {
+        // Delegation is the whole point of a manager, so it is visible on the
+        // lane doing the work rather than only in the event log.
+        state.delegations[p.task_id] = p;
+        var chip = el("worker-agent");
+        if (chip) {
+          chip.textContent = "👤 " + (p.member_name || p.member) + " · delegated by " +
+            (state.managerName || p.manager);
+          chip.hidden = false;
+        }
+        renderTasks();
+        break;
+      }
+
       case "agent.assigned":
+        state.managerName = p.name || p.agent_id;
         showWorkerAgent(p);
         el("run-id").textContent = (el("run-id").textContent || "") + " · @" + (p.agent_id || "");
         break;
@@ -906,6 +951,7 @@
     state.files = []; state.calls = 0; state.tokens = 0; state.cost = 0; state.rounds = 0;
     state.goal = goal;
     state.streamErrors = 0;
+    state.delegations = {}; state.managerName = "";
     el("deliverable").textContent = "";
     el("critic-cards").innerHTML = "";
     el("error-banner").hidden = true;

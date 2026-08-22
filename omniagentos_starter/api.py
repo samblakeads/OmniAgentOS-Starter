@@ -350,10 +350,17 @@ def create_app(settings: Settings | None = None, orchestrator: Orchestrator | No
         return slug if slug and safe_agent_slug(slug) == slug else None
 
     def _with_memory(body: dict) -> dict:
-        """Roster cards show how much each agent has actually learned."""
+        """Roster cards show how much each agent has learned, and who it manages."""
         counts = orch.memory.lesson_counts_by_agent()
+        listed = {a.get("id"): a for a in (body.get("agents") or [])}
         for item in body.get("agents") or []:
             item["lessons"] = counts.get(item.get("id") or "", 0)
+            # The card shows names, not slugs — a roster of ids is a database
+            # table, not a team.
+            item["team_members"] = [
+                {"id": m, "name": (listed.get(m) or {}).get("name") or m}
+                for m in (item.get("team") or [])
+            ]
         body["items"] = body["agents"]
         return body
 
@@ -387,7 +394,7 @@ def create_app(settings: Settings | None = None, orchestrator: Orchestrator | No
                 {"error_tag": "BAD_REQUEST", "message": "the body must be a JSON object"}, status_code=400
             )
         try:
-            agent = store.create(payload, library=orch.library)
+            agent = store.create(payload, library=orch.library, roster=_reload_roster())
         except AgentError as exc:
             return _agent_error(exc)
         _reload_roster()
@@ -416,7 +423,7 @@ def create_app(settings: Settings | None = None, orchestrator: Orchestrator | No
                 {"error_tag": "BAD_REQUEST", "message": "the body must be a JSON object"}, status_code=400
             )
         try:
-            agent = store.update(slug, payload, library=orch.library)
+            agent = store.update(slug, payload, library=orch.library, roster=_reload_roster())
         except AgentError as exc:
             return _agent_error(exc)
         _reload_roster()

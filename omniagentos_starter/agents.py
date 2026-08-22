@@ -40,6 +40,12 @@ MAX_BODY_CHARS = 6000
 MAX_NAME_CHARS = 80
 MAX_TITLE_CHARS = 120
 MAX_AGENT_SKILLS = 8
+MAX_TEAM_MEMBERS = 8
+# A manager may manage managers, but not managers-of-managers. Depth 1 is a
+# manager over plain members; depth 2 is a manager over a manager over plain
+# members. Beyond that the delegation chain stops being something an operator
+# can hold in their head, and a run's provenance stops being explainable.
+MAX_TEAM_DEPTH = 2
 MAX_SLUG_LEN = 64
 BUILTIN_AGENT_SLUG = "general-worker"
 VISIBILITIES = ("public", "private")
@@ -55,6 +61,7 @@ FRONT_MATTER_KEYS = (
     "memory_scope",
     "visibility",
     "version",
+    "team",
 )
 
 AGENT_PROHIBITION = (
@@ -191,6 +198,9 @@ class Agent:
     title: str = ""
     persona: str = ""
     skills: list[str] = field(default_factory=list)
+    # Slugs this agent manages. A non-empty team makes it a MANAGER: a run
+    # assigned to it is planned by it and executed by them.
+    team: list[str] = field(default_factory=list)
     tools: list[str] = field(default_factory=lambda: list(TOOL_NAMES))
     memory_scope: str = ""
     visibility: str = "public"
@@ -203,6 +213,11 @@ class Agent:
     # one nobody added an agent to.
     enabled: bool = True
     errors: list[str] = field(default_factory=list)
+
+    @property
+    def manages(self) -> bool:
+        """True when this agent delegates rather than doing the work itself."""
+        return bool(self.team)
 
     @property
     def sha256(self) -> str:
@@ -220,6 +235,8 @@ class Agent:
             "title": self.title,
             "persona": self.persona,
             "skills": list(self.skills),
+            "team": list(self.team),
+            "manages": self.manages,
             "tools": list(self.tools),
             "memory_scope": self.memory_scope or self.slug,
             "visibility": self.visibility,
@@ -264,6 +281,7 @@ def front_matter_document(agent: Agent) -> str:
         "title": agent.title,
         "persona": agent.persona,
         "skills": list(agent.skills),
+        "team": list(agent.team),
         "tools": list(agent.tools),
         "memory_scope": agent.memory_scope or agent.slug,
         "visibility": agent.visibility,
@@ -301,12 +319,16 @@ def parse_agent(path: Path, builtin: bool = False) -> Agent:
     skills = meta.get("skills") or []
     if isinstance(skills, str):
         skills = [skills]
+    team = meta.get("team") or []
+    if isinstance(team, str):
+        team = [team]
     return Agent(
         slug=slug,
         name=str(meta.get("name") or slug.replace("-", " ").title())[:MAX_NAME_CHARS],
         title=str(meta.get("title") or "")[:MAX_TITLE_CHARS],
         persona=str(meta.get("persona") or "").strip()[:MAX_PERSONA_CHARS],
         skills=[s for s in (str(x).strip() for x in skills) if s][:MAX_AGENT_SKILLS],
+        team=[t for t in (safe_agent_slug(x) for x in team) if t][:MAX_TEAM_MEMBERS],
         tools=normalise_tools(meta.get("tools")),
         memory_scope=safe_agent_slug(meta.get("memory_scope") or slug),
         visibility=visibility,
@@ -488,7 +510,80 @@ def load_agents(root: Path | str | None, library=None) -> AgentRoster:
             roster.errors.append(f"{path.name}: {reason}")
         roster.agents.append(agent)
     roster.agents.sort(key=lambda a: a.slug)
+    _validate_hierarchy(roster)
     return roster
+
+
+def _validate_hierarchy(roster: AgentRoster) -> None:
+    """Disable any manager whose team does not describe a runnable hierarchy.
+
+    Every failure here is a DISABLED agent carrying a reason — never an
+    exception. A roster is a directory an operator edits by hand, so a bad
+    `team:` line is an ordinary mistake, and a mistake that crashes the server on
+    boot is a far worse outcome than one that says "this agent cannot run, and
+    here is why". The rest of the roster keeps working.
+
+    Three ways to be unrunnable:
+
+    * a member that is not in the roster — delegating to nobody;
+    * a cycle, including an agent listing itself — delegation that never reaches
+      anyone who does work;
+    * a chain deeper than MAX_TEAM_DEPTH — legal, but past the point where an
+      operator can say who did what.
+    """
+    by_slug = {a.slug: a for a in roster.agents}
+    if roster.builtin:
+        by_slug.setdefault(roster.builtin.slug, roster.builtin)
+
+    def disable(agent: Agent, reason: str) -> None:
+        agent.enabled = False
+        if reason not in agent.errors:
+            agent.errors.append(reason)
+        roster.errors.append(f"{Path(agent.path).name or agent.slug}: {reason}")
+
+    for agent in roster.agents:
+        if not agent.team:
+            continue
+        if agent.slug in agent.team:
+            disable(agent, "team includes itself — an agent cannot delegate to itself")
+            continue
+        missing = [m for m in agent.team if m not in by_slug]
+        if missing:
+            disable(agent, f"team members are not in the roster: {', '.join(sorted(missing))}")
+
+    def depth(slug: str, seen: tuple[str, ...]) -> int | str:
+        """Longest delegation chain below `slug`, or the reason it is unusable."""
+        if slug in seen:
+            return "team contains a cycle: " + " → ".join([*seen, slug])
+        agent = by_slug.get(slug)
+        if agent is None or not agent.team:
+            return 0
+        deepest = 0
+        for member in agent.team:
+            below = depth(member, (*seen, slug))
+            if isinstance(below, str):
+                return below
+            deepest = max(deepest, below)
+        return deepest + 1
+
+    for agent in roster.agents:
+        if not agent.team or not agent.enabled:
+            continue
+        broken = [m for m in agent.team if (by_slug.get(m) and not by_slug[m].enabled)]
+        if broken:
+            # Present but unusable is not better than absent: the delegation
+            # would fail mid-run, after the operator had committed to it.
+            disable(agent, f"team members are disabled: {', '.join(sorted(broken))}")
+            continue
+        result = depth(agent.slug, ())
+        if isinstance(result, str):
+            disable(agent, result)
+        elif result > MAX_TEAM_DEPTH:
+            disable(
+                agent,
+                f"delegation chain is {result} deep; the limit is {MAX_TEAM_DEPTH} "
+                "so a run's provenance stays explainable",
+            )
 
 
 def _unloadable(path: Path, root: Path, reason: str) -> Agent:
@@ -611,6 +706,11 @@ class AgentStore:
             skills = [skills]
         if not isinstance(skills, (list, tuple)):
             raise AgentError("BAD_REQUEST", "skills must be a list of skill ids")
+        team = payload.get("team") or []
+        if isinstance(team, str):
+            team = [team]
+        if not isinstance(team, (list, tuple)):
+            raise AgentError("BAD_REQUEST", "team must be a list of agent ids")
         visibility = str(payload.get("visibility") or "public").strip().lower()
         if visibility not in VISIBILITIES:
             raise AgentError("BAD_REQUEST", f"visibility must be one of {list(VISIBILITIES)}")
@@ -620,6 +720,7 @@ class AgentStore:
             title=title,
             persona=str(payload.get("persona") or "").strip()[:MAX_PERSONA_CHARS],
             skills=[s for s in (str(x).strip() for x in skills) if s][:MAX_AGENT_SKILLS],
+            team=[t for t in (safe_agent_slug(x) for x in team) if t][:MAX_TEAM_MEMBERS],
             tools=normalise_tools(payload.get("tools")),
             memory_scope=safe_agent_slug(payload.get("memory_scope") or wanted),
             visibility=visibility,
@@ -627,10 +728,11 @@ class AgentStore:
             body=str(payload.get("body") or payload.get("instructions") or "").strip()[:MAX_BODY_CHARS],
         )
 
-    def create(self, payload: dict, library=None) -> Agent:
+    def create(self, payload: dict, library=None, roster: AgentRoster | None = None) -> Agent:
         agent = self.build(payload)
         self._ready()
         self._require_known_skills(agent, library)
+        self._require_valid_team(agent, roster)
         self._refuse_builtin_slug(agent.slug)
         path = self.path_for(agent.slug)
         if path.exists():
@@ -639,7 +741,7 @@ class AgentStore:
         self._write_atomically(path, agent.raw)
         return agent
 
-    def update(self, slug: str, payload: dict, library=None) -> Agent:
+    def update(self, slug: str, payload: dict, library=None, roster: AgentRoster | None = None) -> Agent:
         """Edit an existing agent. Fields the caller omits keep their value.
 
         A PUT that carried only the field being changed used to be rejected for
@@ -689,6 +791,7 @@ class AgentStore:
 
         agent = self.build(merged, slug=target_slug)
         self._require_known_skills(agent, library)
+        self._require_valid_team(agent, roster)
 
         if target_slug == safe_agent_slug(slug):
             agent.path = str(path)
@@ -732,6 +835,7 @@ class AgentStore:
                 "title": payload.get("title", source.title),
                 "persona": payload.get("persona", source.persona),
                 "skills": payload.get("skills", list(source.skills)),
+                "team": payload.get("team", list(source.team)),
                 "tools": payload.get("tools", list(source.tools)),
                 "visibility": payload.get("visibility", source.visibility),
                 "version": payload.get("version", source.version),
@@ -740,6 +844,7 @@ class AgentStore:
             slug=payload.get("slug") or default_slug or None,
         )
         self._require_known_skills(clone, library)
+        self._require_valid_team(clone, roster)
         self._refuse_builtin_slug(clone.slug)
         path = self.path_for(clone.slug)
         if path.exists():
@@ -762,6 +867,47 @@ class AgentStore:
             raise AgentError("AGENT_NOT_FOUND", f"no agent {safe!r}", status=404)
         path.unlink()
         return safe
+
+    @staticmethod
+    def _require_valid_team(agent: Agent, roster: AgentRoster | None) -> None:
+        """Refuse a team the loader would only disable anyway.
+
+        Writing an agent and then telling the operator it is broken is a worse
+        experience than refusing the write, and the checks are the same ones —
+        so they run here too, against the roster as it stands.
+        """
+        if not agent.team or roster is None:
+            return
+        if agent.slug in agent.team:
+            raise AgentError("BAD_REQUEST", "an agent cannot be a member of its own team")
+        missing = [m for m in agent.team if roster.by_id(m) is None]
+        if missing:
+            raise AgentError(
+                "BAD_REQUEST", f"these team members are not in the roster: {', '.join(sorted(missing))}"
+            )
+        disabled = [m for m in agent.team if not (roster.by_id(m) or agent).enabled]
+        if disabled:
+            raise AgentError(
+                "BAD_REQUEST", f"these team members are disabled: {', '.join(sorted(disabled))}"
+            )
+        # Walk the chain the new agent would create and refuse a cycle or an
+        # over-deep hierarchy before it reaches the disk.
+        def walk(slug: str, seen: tuple[str, ...]) -> int:
+            if slug in seen:
+                raise AgentError(
+                    "BAD_REQUEST", "that team would create a cycle: " + " → ".join([*seen, slug])
+                )
+            member = agent if slug == agent.slug else roster.by_id(slug)
+            if member is None or not member.team:
+                return 0
+            return max(walk(m, (*seen, slug)) for m in member.team) + 1
+
+        depth = walk(agent.slug, ())
+        if depth > MAX_TEAM_DEPTH:
+            raise AgentError(
+                "BAD_REQUEST",
+                f"that team is {depth} levels deep; the limit is {MAX_TEAM_DEPTH}",
+            )
 
     @staticmethod
     def _refuse_builtin_slug(slug: str) -> None:

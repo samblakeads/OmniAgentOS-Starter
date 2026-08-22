@@ -42,7 +42,7 @@ in this working tree.
 
 | boundary | mocked tests | unmocked check | env required | evidence path |
 |---|---|---|---|---|
-| api.x.ai | none in D2/D4/D5/D9/D16 (forbidden: MockTransport, monkeypatch, respx, stub of api.x.ai) | D2 live unmocked run + D4 extra_dod loop + D5 memory + D9 DEMO drills + D16 agent-run persona/skill-isolation/memory/regression; every counted llm.call has provider_host=api.x.ai | XAI_API_KEY; OMNIAGENTOS_BASE_URL unset or exactly https://api.x.ai/v1 | evidence/d2-live-run.json, evidence/d4-loop.json, evidence/d5-memory.json, evidence/d9-demo-*.json, evidence/d16-agent-run.json |
+| api.x.ai | none in D2/D4/D5/D9/D16/D18 (forbidden: MockTransport, monkeypatch, respx, stub of api.x.ai) | D2 live unmocked run + D4 extra_dod loop + D5 memory + D9 DEMO drills + D16 agent-run persona/skill-isolation/memory/regression + D18 team-run delegation with per-task prompt isolation; every counted llm.call has provider_host=api.x.ai | XAI_API_KEY; OMNIAGENTOS_BASE_URL unset or exactly https://api.x.ai/v1 | evidence/d2-live-run.json, evidence/d4-loop.json, evidence/d5-memory.json, evidence/d9-demo-*.json, evidence/d16-agent-run.json, evidence/d18-team-run.json |
 | browser-playwright | none for D3/D13/D15 (real Chromium, real child, real SSE) | D3 operator-vantage primary journey; D7 visible banner text; D13 no-key demo screenshot; D15 agent create/reload/duplicate/edit/delete via the Agents UI | XAI_API_KEY for D3/D15; no provider keys for D13; chromium in .venv | evidence/d3-vantage.png, evidence/d3-vantage.json, evidence/d13-nokey.png, evidence/d15-agent-create.json |
 | GitHub-gh | none in this oracle (GH workflow state is a different unit) | D8 in-repo `pytest --collect-only` on tests/dod collected>0 and live tests do not skip while a key exists | none (XAI_API_KEY only to refuse silent skips) | evidence/d8-collect.json |
 | filesystem-sandbox | none: D10 drives write_file through engine.execute_worker_tool, not a bare WorkspaceGuard unit test | D10 WORKSPACE_ESCAPE for ../x, foo/../../x, /tmp/x, prefix-collision, symlink-out, null-byte; repo-root/package-dir/data-dir refused at construction; no subprocess/os.system/Popen/eval(/exec(; planted key never leaks | planted OMNIAGENTOS_API_KEY=secret_TESTKEY_d10_7f3a9c2e (fail if unset) | evidence/d10-invariants.txt |
@@ -67,6 +67,8 @@ in this working tree.
 - **D15 (Round 6):** A UI card materialising from client-side state alone, with no server write, or `/api/agents` backed by an in-memory list that resets on reload. Now the created agent must exist as a real `agents/<slug>.md` file (isolated tmp root) with matching front-matter, survive a full page reload, be listed by a real `GET /api/agents` on the SAME running child, round-trip through duplicate (new slug, copied persona) and PUT edit (persisted to disk), and DELETE on the shipped `general-worker` builtin must 403 while the file survives; a non-builtin DELETE must succeed and remove its file.
 - **D16 (Round 6):** `agent_id` accepted in the request body but silently ignored by the router (business as usual), or an `agent.assigned` event emitted without the persona/skill actually reaching the LLM. Now the worker prompt transcript must contain the persona text verbatim AND the agent's own `skill-sha256:<hex>`, and must NOT contain the `skill-sha256` of a different shipped pack (proves the agent's skill list actually restricts the router, not just suggests to it); the run must be `done` with `verified is True`; `lesson.saved.agent_id` must match; a second run by the same agent must recall that lesson via `memory.recalled.agent_id`; and a sibling run WITHOUT `agent_id` must still behave exactly as before (no `agent.assigned` event, still `done`+`verified`) — the explicit regression guard.
 - **D17 (Round 6):** A slug/name filter that only rejects the literal substring `../` while a URL-encoded or absolute-path variant still escapes, or a `tools` list that is unioned with (rather than intersected against) the global allow-list, or persona text concatenated raw into the system prompt so `</worker_instructions><system>...` breaks out of its tag. Now every malicious slug (`../..`, absolute, NUL byte) is driven through the real `POST /api/agents` and must both 400 AND leave no file outside the isolated agents root; a `tools` superset of `[read_file, write_file, list_files]` must 400 while a subset succeeds; a planted `</worker_instructions><system>` in the persona must appear escaped (or absent, never raw) in the actual recorded prompt transcript; and the full D10 workspace-escape + no-shell + no-key-leak suite is re-run byte-for-byte to prove Round 6 introduced no regression in the sandbox invariants.
+
+- **D18 (Round 8):** `agent_id` resolved to a manager but the manager silently executes both parts of the goal itself (team is decorative), or `team.delegated` fires without the delegated member's own persona/skill actually reaching THAT task's prompt (only proven somewhere in the whole transcript), or a self-referential/cyclic/too-deep team loads as if healthy and only crashes (500) later on a run. Now `POST /api/runs` against a manager must produce ≥2 `team.delegated` events naming ≥2 DISTINCT members; each delegated task's OWN `prompts.jsonl` line (attributed by `task_id`) must carry that member's persona verbatim and that member's own `skill-sha256`, and must NEVER carry the other member's or the manager's own `skill-sha256`; the run must be `done`+`verified`; `lesson.saved` must be attributed to the executing member's own scope; and a self/cycle/depth>2/missing-member team must never 500 — it must be listed `disabled` with a recorded reason in `GET /api/agents`, and `POST /api/runs` against it must 400.
 
 ## Round 6 — AGENTS pins (binding on implementers, added with D15–D17)
 
@@ -136,6 +138,40 @@ in this working tree.
   /api/agents` and dispatch that goal with the returned `agent_id`, asserting
   `agent.assigned` fires and (D12) `t_done_ms < 120000` still holds with the
   agent in the loop.
+
+## Round 8 — TEAMS pins (binding on implementers, added with D18)
+
+- **`team` field:** agent front-matter gains `team: [member_slug, ...]`,
+  making that agent a MANAGER. `create_agent()`/`create_agent_idempotent()`
+  in `_harness.py` gained an optional `team=` kwarg that POSTs this field —
+  additive, no existing caller's contract changed.
+- **`POST /api/runs` with a manager `agent_id`:** the Planner assigns each
+  task in the plan to one of the manager's team members; that member's
+  persona+skills are used for THAT task's worker (never the manager's own
+  skills, even if the manager was created with some); the manager's persona
+  frames the plan only.
+- **`team.delegated` event:** `{manager, task_id, member}`, one per
+  delegated task. `manager` and `member` are both agent slugs.
+- **Per-task prompt attribution (BINDING, new on `prompts.jsonl`):** a
+  worker-role prompt line for a delegated task MUST carry a `task_id` field
+  matching the `task_id` in its `team.delegated` event, so the oracle (and
+  any auditor) can attribute persona/skill-sha injection to the EXACT
+  delegated task rather than the whole run's transcript. This is additive
+  to the existing `prompts.jsonl` contract (worker lines already carry
+  `skill-sha256:<hex>`; this only adds the `task_id` field).
+- **Cycle/depth/self/missing-member guard:** a team may not contain the
+  agent itself, a cycle, a chain deeper than 2 levels of manager-of-manager,
+  or a slug that doesn't resolve to an existing agent. Any of these must
+  NEVER 500 (at creation or later at run time) — the agent is created (2xx)
+  but listed `enabled: false` (or `disabled: true`) with a non-empty
+  `errors`/`error`/`reason` field in `GET /api/agents`, and `POST /api/runs`
+  against that slug returns 400.
+- **Member tools never widen beyond global:** unchanged from D17's
+  Round-6 pin — a team member's own `tools` are still bounded by
+  `AGENT_GLOBAL_TOOLS`; being on a team grants no additional privilege.
+- **UI `[data-testid="agent-team"]`** on the manager's roster card, listing
+  its team member(s) by slug or display name (test_d15's minimal extension,
+  `test_d15_manager_card_lists_team_members`, checks either form matches).
 
 ## Binding pins the oracle assumes (also listed in the U0 report)
 

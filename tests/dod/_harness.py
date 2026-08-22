@@ -778,6 +778,31 @@ def load_prompts(data_dir: Path, run_id: str) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def load_prompt_lines(data_dir: Path, run_id: str) -> list[dict[str, Any]]:
+    """Parse <data-dir>/runs/<run_id>/prompts.jsonl into a list of dicts.
+
+    Malformed lines are skipped (best-effort), never raised on — callers
+    that need the raw blob should use load_prompts() instead. BINDING
+    (Round 8): a worker-role line delegated by a manager MUST carry a
+    `task_id` field matching the task_id in its team.delegated event, so
+    per-task prompt content (persona, skill-sha) can be attributed to the
+    exact delegated task rather than the whole transcript.
+    """
+    blob = load_prompts(data_dir, run_id)
+    out: list[dict[str, Any]] = []
+    for line in blob.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict):
+            out.append(obj)
+    return out
+
+
 def recalled_lesson_ids(rec: dict[str, Any]) -> list[str]:
     data = event_payload(rec)
     if "lesson_ids" in data and isinstance(data["lesson_ids"], list):
@@ -1053,11 +1078,19 @@ def create_agent(
     persona: str,
     skills: list[str],
     tools: list[str] | None = None,
+    team: list[str] | None = None,
 ) -> dict[str, Any]:
-    """POST /api/agents. Returns the parsed JSON body (must include a slug)."""
+    """POST /api/agents. Returns the parsed JSON body (must include a slug).
+
+    BINDING (Round 8): `team` (list of member agent slugs) makes this agent
+    a MANAGER — POST /api/runs with a manager agent_id delegates tasks to
+    team members instead of executing them itself.
+    """
     body: dict[str, Any] = {"name": name, "title": title, "persona": persona, "skills": skills}
     if tools is not None:
         body["tools"] = tools
+    if team is not None:
+        body["team"] = team
     resp = post_json(base_url, "/api/agents", body)
     if resp.status_code not in (200, 201):
         raise AssertionError(f"POST /api/agents -> HTTP {resp.status_code}: {resp.text[:800]}")
@@ -1169,12 +1202,17 @@ def first_real_skill() -> tuple[str, str]:
     return f.stem, hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def second_real_skill(exclude_slug: str) -> tuple[str, str]:
-    """Return (skill_slug, sha256) of a DIFFERENT shipped skill than exclude_slug.
+def second_real_skill(exclude_slug: str | list[str]) -> tuple[str, str]:
+    """Return (skill_slug, sha256) of a shipped skill NOT in exclude_slug.
+
+    exclude_slug may be a single slug (original D16 contract, unchanged) or
+    a list of slugs to exclude (Round 8: D18 needs a THIRD skill distinct
+    from both team members' skills, for the manager).
 
     Used by D16 to prove a pack outside the agent's list never reaches the
-    worker prompt.
+    worker prompt, and by D18 to prove the same for a manager's own skills.
     """
+    excluded = {exclude_slug} if isinstance(exclude_slug, str) else set(exclude_slug)
     root = REPO_ROOT / "skills"
     files = sorted(
         p
@@ -1182,14 +1220,18 @@ def second_real_skill(exclude_slug: str) -> tuple[str, str]:
         if p.name.lower() != "readme.md" and p.parent.name != "_builtin"
     )
     for f in files:
-        if f.stem != exclude_slug:
+        if f.stem not in excluded:
             text = f.read_text(encoding="utf-8")
             return f.stem, hashlib.sha256(text.encode("utf-8")).hexdigest()
-    raise AssertionError("need >=2 shipped skills to prove skill isolation (D16)")
+    raise AssertionError(f"need >={len(excluded) + 1} shipped skills, excluding {excluded!r}")
 
 
 def agent_events_of(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return events_of(events, "agent.assigned")
+
+
+def team_delegated_events_of(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return events_of(events, "team.delegated")
 
 
 def pick_agent_skill() -> str:

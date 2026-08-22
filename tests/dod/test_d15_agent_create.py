@@ -5,6 +5,7 @@ from __future__ import annotations
 import httpx
 import pytest
 from _harness import (
+    create_agent,
     find_agent_file,
     find_agent_file_by_name,
     first_real_skill,
@@ -142,6 +143,68 @@ def test_d15_agent_create_edit_duplicate_delete_via_browser():
         write_json(
             "d15-agent-create.json",
             {"slug": slug, "duplicate_slug": dup_slug, "agents_root": str(agents_root)},
+        )
+    finally:
+        srv.stop()
+
+
+
+def test_d15_manager_card_lists_team_members():
+    """Round 8 (minimal extension): a manager's roster card must list its team.
+
+    data-testid="agent-team" on the card (pinned in BOUNDARIES.md) — this is
+    the ONLY new assertion; it does not touch the create/edit/duplicate/
+    delete flow already proven above.
+    """
+    require_live()
+    assert live_xai_base_url_ok()
+
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError as exc:
+        pytest.fail(f"playwright not installed in the repo .venv: {exc}")
+
+    skill_slug, _skill_sha = first_real_skill()
+    agents_root = tmp_agents_root()
+    srv = spawn_serve(extra_env={"OMNIAGENTOS_AGENTS_ROOT": str(agents_root)})
+    try:
+        member = create_agent(
+            srv.base_url,
+            name="Team Card Member D15",
+            title="Specialist",
+            persona="A specialist member persona for the D15 team-card check.",
+            skills=[skill_slug],
+        )
+        manager = create_agent(
+            srv.base_url,
+            name="Team Card Manager D15",
+            title="Manager",
+            persona="A manager persona for the D15 team-card check.",
+            skills=[],
+            team=[member["slug"]],
+        )
+
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
+            page.goto(srv.base_url + "/", wait_until="networkidle", timeout=30_000)
+
+            manager_card = page.locator(AGENT_CARD_SEL).filter(has_text="Team Card Manager D15")
+            manager_card.first.wait_for(state="visible", timeout=15_000)
+
+            team_el = manager_card.first.locator('[data-testid="agent-team"]')
+            team_el.wait_for(state="visible", timeout=10_000)
+            team_text = team_el.inner_text(timeout=10_000)
+            assert member["slug"] in team_text or "Team Card Member D15" in team_text, (
+                f"manager card's [data-testid=\"agent-team\"] does not list its member "
+                f"(slug {member['slug']!r} or its name): got {team_text!r}"
+            )
+
+            browser.close()
+
+        write_json(
+            "d15-team-card.json",
+            {"manager": manager["slug"], "member": member["slug"]},
         )
     finally:
         srv.stop()
