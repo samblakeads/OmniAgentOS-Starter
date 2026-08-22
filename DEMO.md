@@ -34,8 +34,8 @@ Draft a 5-email onboarding sequence for OmniAgentOS Starter and save each email 
 - [ ] The dashboard's **Replay demo** control (next to Run) has been
       test-clicked once on the already-running stage server — that is the
       fallback if the provider hiccups live, not a second `omniagentos demo`
-      process (that starts its own server on the same default port and
-      collides with the one already running the show — see the Recovery
+      process (that one works fine on its own port now, but it's a second
+      dashboard on the projector and costs you the beat — see the Recovery
       beats below).
 - [ ] Browser zoom is up (this is a stage, not a laptop) and the dashboard
       tab is already open at `http://127.0.0.1:8486`.
@@ -177,11 +177,11 @@ you're running this white-labeled for them."
   replays a real recorded run at the same paced speed on the SAME server,
   so the audience sees the identical loop without waiting on a live model
   and without touching a terminal.
-  **Do not** run `omniagentos demo` as a separate command here — it starts
-  its own `serve` on the same default port (8486) the stage server is
-  already using and will fail to bind. That command is for rehearsing the
-  replay beforehand or for the "nothing loads at all" case below, never for
-  a mid-show recovery while the real server is up.
+  **Do not** run `omniagentos demo` as a separate command here. It works —
+  it starts its own server on port 8487 (falling back to an ephemeral port
+  if 8487 is busy) rather than colliding with the stage server on 8486 —
+  but it puts a second dashboard on the projector and costs you the beat
+  for nothing. The button is on the screen already; use it.
 - **A run ends `run.failed`**: the error banner will show the specific
   `error_tag` (not a generic "something went wrong"). Point at it, then hit
   **Retry this goal** — the button is right there on the failed run, no

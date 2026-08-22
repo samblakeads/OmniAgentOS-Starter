@@ -93,10 +93,12 @@ def _looks_like_secret_blob(candidate: str) -> bool:
     has_digit = any(c.isdigit() for c in candidate)
     has_upper = any(c.isupper() for c in candidate)
     has_lower = any(c.islower() for c in candidate)
-    # require digit presence, and either case-mixing or no separators at all
-    # (a single unbroken run with a digit is still suspicious even if it's
-    # all-lowercase, e.g. an api token like "abc123...").
-    return has_digit and (has_upper or "/" not in candidate)
+    # require digit presence, and either genuine case-mixing (upper AND
+    # lower both present) or no slash separators at all (a single unbroken
+    # run with a digit is still suspicious even if it's one case, e.g. an
+    # api token like "abc123..." — but "ABC123/XYZ456"-shaped text with a
+    # slash and only one case is more likely structured text than a secret).
+    return has_digit and ((has_upper and has_lower) or "/" not in candidate)
 
 
 def parse_front_matter(text: str, path: Path) -> tuple[dict, str, list[str]]:

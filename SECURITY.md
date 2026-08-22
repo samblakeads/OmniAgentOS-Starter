@@ -21,10 +21,19 @@ find a case where one of them doesn't hold, that's a security bug, not just a
 regular bug:
 
 - **Local-only by default.** The server binds `127.0.0.1` unless you pass
-  `--host 0.0.0.0` explicitly. Binding to `0.0.0.0` **requires**
-  `OMNIAGENTOS_TOKEN` to be set, and every `/api/*` request must then carry it
-  as a `Bearer` token — the server refuses to start bound to a non-loopback
-  address without a token configured.
+  `--host 0.0.0.0` explicitly (for reaching it from another device on your
+  LAN, for example). Binding to `0.0.0.0` **requires** `OMNIAGENTOS_TOKEN` to
+  be set — the server refuses to start bound to a non-loopback address
+  without one. Every `/api/*` request must then be authorised, one of three
+  ways: an API client sends `Authorization: Bearer <token>`; a browser opens
+  `http://host:port/?token=<token>` once, which exchanges it at
+  `POST /api/session` for a same-origin `httpOnly` cookie (then scrubs the
+  token out of the address bar) so the SSE stream and workspace file links
+  keep working with no header support needed; or, on the events route only,
+  a `?token=` query parameter for a hand-driven `curl` against the stream —
+  never accepted on anything that mutates state. A missing/invalid token
+  returns `error_tag: APP_AUTH` (distinct from `PROVIDER_AUTH`, which is
+  about your LLM provider key, not this token).
 - **No shell access for agents.** Worker agents can only call the workspace
   tools (`read_file`, `write_file`, `list_files`) scoped to a per-run
   workspace directory. There is no shell/exec tool, and the package contains

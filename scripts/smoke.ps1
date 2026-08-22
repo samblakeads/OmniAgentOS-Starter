@@ -92,7 +92,11 @@ try {
     }
     if (-not $Health) { Fail "server never answered /api/health within 30s" }
     if (-not $Health.configured) { Fail "/api/health did not report configured:true — set XAI_API_KEY / OPENROUTER_API_KEY / OPENAI_API_KEY" }
-    Write-Host "==> health OK, configured:true"
+    # Belt-and-braces: configured:true and status:"degraded" are set together
+    # today (both flip on the same provider-unreachable probe), but check
+    # status explicitly too rather than relying on that correlation forever.
+    if ($Health.status -ne "ok") { Fail "/api/health reported status:$($Health.status), not ok — provider is configured but unreachable" }
+    Write-Host "==> health OK, configured:true, status:ok"
 
     $Goal = "Write a 3-bullet summary of why agent orchestration beats a chatbox."
     $StartTs = Get-Date

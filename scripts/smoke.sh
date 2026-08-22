@@ -84,10 +84,17 @@ if [ -z "$HEALTH_JSON" ]; then
 fi
 
 CONFIGURED="$(printf '%s' "$HEALTH_JSON" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(str(bool(d.get("configured"))).lower())' 2>/dev/null || echo "unknown")"
+HEALTH_STATUS="$(printf '%s' "$HEALTH_JSON" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("status","unknown"))' 2>/dev/null || echo "unknown")"
 if [ "$CONFIGURED" != "true" ]; then
   fail "/api/health did not report configured:true (got: $HEALTH_JSON) — set XAI_API_KEY / OPENROUTER_API_KEY / OPENAI_API_KEY"
 fi
-echo "==> health OK, configured:true"
+# Belt-and-braces: configured:true and status:"degraded" are set together
+# today (both flip on the same provider-unreachable probe), but check status
+# explicitly too rather than relying on that correlation holding forever.
+if [ "$HEALTH_STATUS" != "ok" ]; then
+  fail "/api/health reported status:$HEALTH_STATUS, not ok (got: $HEALTH_JSON) — provider is configured but unreachable"
+fi
+echo "==> health OK, configured:true, status:ok"
 
 GOAL='Write a 3-bullet summary of why agent orchestration beats a chatbox.'
 COMMIT_SHA="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo "unknown")"

@@ -127,8 +127,12 @@ licensed under this project's MIT license.
 
 ## Security
 
-- Binds `127.0.0.1` by default. `--host 0.0.0.0` requires `OMNIAGENTOS_TOKEN`
-  and a Bearer token on every `/api/*` request.
+- Binds `127.0.0.1` by default. `--host 0.0.0.0` (e.g. to reach it from
+  another device on your LAN) requires `OMNIAGENTOS_TOKEN`. Open the
+  dashboard once as `http://host:port/?token=<token>` — the page exchanges
+  it for a same-origin cookie and scrubs it from the address bar, so you
+  don't paste it again. API clients can send `Authorization: Bearer <token>`
+  instead.
 - No shell/exec tool anywhere — agents can only read/write inside a
   per-run, sandboxed workspace directory.
 - Provider keys never appear in logs, events, or API responses — every
