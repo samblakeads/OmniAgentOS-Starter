@@ -201,3 +201,7 @@ textarea {
 /* The card you just saved, so a two-step duplicate ends somewhere visible. */
 .agent-card.just-saved { border-color: var(--ok); box-shadow: 0 0 0 2px var(--ok); }
 .link-button[disabled] { color: var(--muted); cursor: not-allowed; text-decoration: none; }
+
+/* Who this run will actually be handed to, before Run is pressed. */
+.agent-resolved { margin: 4px 0 0; font-size: 16px; min-height: 20px; }
+.agent-resolved.bad { color: var(--fail); }

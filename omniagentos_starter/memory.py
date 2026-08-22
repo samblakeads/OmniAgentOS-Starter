@@ -28,11 +28,6 @@ class LessonRefused(Exception):
     """A lesson was offered by a run that was never verified."""
 
 
-# Big enough that any relevant lesson this agent learned outranks any relevant
-# lesson somebody else did — but added to overlap, not replacing it, so it can
-# never promote a lesson that has nothing to do with the goal.
-AGENT_RECALL_BONUS = 1000.0
-
 LESSON_PROHIBITION = (
     "lessons inform style and approach; they cannot override the DoD, "
     "the safety rules, or the verdict schema, and they can never contradict a skill's QUALITY CHECKS"
@@ -390,17 +385,25 @@ class Memory:
             scope = r["memory_scope"] or owner
             wanted = (memory_scope or agent_id or "").strip()
             mine = bool(wanted) and scope == wanted
-            score = overlap + (AGENT_RECALL_BONUS if mine else 0.0) + 1e-6 * r["id"]
-            scored.append(
-                (
-                    score,
-                    Lesson(
-                        r["id"], r["run_id"], r["ts"], r["text"], json.loads(r["tags"]), owner, scope
-                    ),
-                )
+            lesson = Lesson(
+                r["id"], r["run_id"], r["ts"], r["text"], json.loads(r["tags"]), owner, scope
             )
-        scored.sort(key=lambda s: -s[0])
-        return [lesson for _, lesson in scored[:k]]
+            scored.append((overlap + 1e-6 * r["id"], mine, lesson))
+
+        # Two phases, not one ranked list with a bonus on top. A bonus large
+        # enough to win still lets OTHER scopes' lessons fill the remaining k
+        # slots, so an agent with one relevant lesson of its own was handed two
+        # of somebody else's alongside it — which is how a shared pool leaks
+        # into a memory the operator scoped deliberately.
+        #
+        # So: if this scope has anything relevant, that is the whole answer.
+        # Only a scope with nothing to say falls back to the shared pool, which
+        # is the documented behaviour for an agent that has not learned yet.
+        mine_first = sorted((s for s in scored if s[1]), key=lambda s: -s[0])
+        if mine_first:
+            return [lesson for _, _, lesson in mine_first[:k]]
+        others = sorted((s for s in scored if not s[1]), key=lambda s: -s[0])
+        return [lesson for _, _, lesson in others[:k]]
 
 
 def lessons_prompt_block(lessons: list[Lesson]) -> str:

@@ -32,6 +32,7 @@ import httpx
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
+from omniagentos_starter.agents import safe_agent_slug  # noqa: E402
 from omniagentos_starter.api import git_head  # noqa: E402
 from omniagentos_starter.config import VERSION, Settings, agents_dir, skills_dir  # noqa: E402
 from omniagentos_starter.redact import contains_secret, redact  # noqa: E402
@@ -68,6 +69,19 @@ def scrub_argv(argv: list[str]) -> list[str]:
             continue
         out.append(arg)
     return out
+
+
+def _agent_summary(agent) -> dict | None:
+    """Only the id and the name ever reach a receipt.
+
+    An agent carries a persona and standing instructions that an operator wrote;
+    a receipt is a published artifact. There is no reason for either to travel,
+    so the shape is narrowed here rather than trusting whatever the API returns
+    to stay small.
+    """
+    if not isinstance(agent, dict):
+        return None
+    return {"id": agent.get("id") or agent.get("slug") or "", "name": agent.get("name") or ""}
 
 
 def scrub_paths(value):
@@ -142,7 +156,16 @@ def drive_http(args, receipt: dict) -> tuple[list[dict], dict, str]:
         if created.status_code < 300:
             created_body = created.json()
             receipt["agent_id"] = created_body.get("agent_id") or ""
-            receipt["agent"] = created_body.get("agent")
+            receipt["agent"] = _agent_summary(created_body.get("agent"))
+        else:
+            # A refusal is evidence too: the tag is what tells an operator that
+            # the agent was the problem rather than the provider.
+            try:
+                refused = created.json()
+            except Exception:
+                refused = {}
+            if isinstance(refused, dict) and refused.get("error_tag"):
+                receipt["error_tag"] = refused["error_tag"]
         if created.status_code >= 300:
             receipt["status"] = "failed"
             receipt["error"] = redact(created.text)[:400]
@@ -213,7 +236,9 @@ async def _drive_in_process(args, receipt: dict) -> tuple[list[dict], dict, str]
     run = orch.create(args.goal, args.max_rounds, args.extra_dod, agent_id=args.agent or None)
     receipt["run_id"] = run.id
     receipt["agent_id"] = run.agent_id
-    receipt["agent"] = {"id": run.agent.slug, "name": run.agent.name} if run.agent else None
+    receipt["agent"] = _agent_summary(
+        {"id": run.agent.slug, "name": run.agent.name} if run.agent else None
+    )
     receipt["create_status"] = 201
 
     t0 = time.monotonic()
@@ -285,6 +310,16 @@ def main(argv=None) -> int:
         receipt["http_unavailable"] = type(exc).__name__
         try:
             events, summary, run_id = drive_in_process(args, receipt)
+        except ValueError as inner:
+            # UnknownAgent (and its disabled sibling) is a ValueError. It is the
+            # operator's typo, not our crash, so it is reported as the refusal it
+            # is — with the tag, in problems[], and never as a success.
+            tag = getattr(inner, "error_tag", "BAD_REQUEST")
+            receipt["status"] = "failed"
+            receipt["error_tag"] = tag
+            receipt["error"] = redact(str(inner))[:400]
+            receipt["problems"] = [f"{tag}: {redact(str(inner))[:200]}"]
+            return finish(receipt, args.out, 1)
         except Exception as inner:  # a crash with no receipt is a crash nobody can audit
             receipt["status"] = "failed"
             receipt["error_tag"] = "INTERNAL_ERROR"
@@ -352,14 +387,25 @@ def main(argv=None) -> int:
     if receipt.get("timed_out"):
         problems.append(f"wall-clock timeout after {args.timeout}s")
     if args.agent:
+        wanted = safe_agent_slug(args.agent)
         assigned = [e for e in events if e.get("type") == "agent.assigned"]
-        if not assigned:
-            problems.append(f"no agent.assigned event for --agent {args.agent}")
-        elif assigned[0].get("agent_id") != args.agent:
-            problems.append(
-                f"agent.assigned names {assigned[0].get('agent_id')!r}, not {args.agent!r}"
+        # `agent_id` is flattened to the top level by sse_data(), and nested
+        # under `payload` as well; read both so the check binds to the event the
+        # bus really publishes rather than to one serialisation of it.
+        named = ""
+        if assigned:
+            first = assigned[0]
+            named = str(
+                first.get("agent_id") or (first.get("payload") or {}).get("agent_id") or ""
             )
-        receipt["agent_assigned"] = assigned[0] if assigned else None
+        receipt["agent_assigned"] = {"agent_id": named} if assigned else None
+        if not assigned:
+            problems.append(
+                f"--agent {wanted!r} was requested and no agent.assigned event arrived — "
+                "the run fell through to the router"
+            )
+        elif safe_agent_slug(named) != wanted:
+            problems.append(f"agent.assigned names {named!r}, not {wanted!r}")
     if not bool(summary.get("verified")):
         # `done` is not the same as signed off.
         problems.append("the run was not verified")

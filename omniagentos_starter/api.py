@@ -345,6 +345,10 @@ def create_app(settings: Settings | None = None, orchestrator: Orchestrator | No
     def _agent_error(exc: AgentError) -> JSONResponse:
         return JSONResponse(redact(exc.as_dict()), status_code=exc.status)
 
+    def _canonical(slug: str) -> str | None:
+        """The slug exactly as it is stored, or None if the caller invented one."""
+        return slug if slug and safe_agent_slug(slug) == slug else None
+
     def _with_memory(body: dict) -> dict:
         """Roster cards show how much each agent has actually learned."""
         counts = orch.memory.lesson_counts_by_agent()
@@ -359,6 +363,11 @@ def create_app(settings: Settings | None = None, orchestrator: Orchestrator | No
 
     @api.get("/agents/{slug}")
     async def get_agent(slug: str) -> JSONResponse:
+        if _canonical(slug) is None:
+            return JSONResponse(
+                {"error_tag": "BAD_REQUEST", "message": f"{slug[:64]!r} is not an agent id"},
+                status_code=400,
+            )
         agent = _reload_roster().by_id(slug)
         if agent is None:
             return JSONResponse(
@@ -386,6 +395,11 @@ def create_app(settings: Settings | None = None, orchestrator: Orchestrator | No
 
     @api.put("/agents/{slug}")
     async def update_agent(slug: str, request: Request) -> JSONResponse:
+        if _canonical(slug) is None:
+            return JSONResponse(
+                {"error_tag": "BAD_REQUEST", "message": f"{slug[:64]!r} is not an agent id"},
+                status_code=400,
+            )
         try:
             payload = await request.json()
         except Exception:
@@ -401,6 +415,11 @@ def create_app(settings: Settings | None = None, orchestrator: Orchestrator | No
 
     @api.post("/agents/{slug}/duplicate")
     async def duplicate_agent(slug: str, request: Request) -> JSONResponse:
+        if _canonical(slug) is None:
+            return JSONResponse(
+                {"error_tag": "BAD_REQUEST", "message": f"{slug[:64]!r} is not an agent id"},
+                status_code=400,
+            )
         try:
             payload = await request.json()
         except Exception:
@@ -419,6 +438,11 @@ def create_app(settings: Settings | None = None, orchestrator: Orchestrator | No
 
     @api.delete("/agents/{slug}")
     async def delete_agent(slug: str) -> JSONResponse:
+        if _canonical(slug) is None:
+            return JSONResponse(
+                {"error_tag": "BAD_REQUEST", "message": f"{slug[:64]!r} is not an agent id"},
+                status_code=400,
+            )
         try:
             removed = store.delete(slug, _reload_roster())
         except AgentError as exc:

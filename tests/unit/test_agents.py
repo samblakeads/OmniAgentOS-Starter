@@ -108,16 +108,24 @@ def test_a_symlinked_agent_file_is_refused(tmp_path):
     outside.write_text(AGENT_MD, encoding="utf-8")
     (root / "sneaky.md").symlink_to(outside)
     roster = load_agents(root)
-    assert roster.agents == []
     assert roster.errors
+    # Listed, disabled, with the reason — a file that vanishes from the roster
+    # is indistinguishable from one nobody ever wrote.
+    sneaky = roster.by_id("sneaky")
+    assert sneaky is not None and sneaky.enabled is False
+    assert any("symlink" in e for e in sneaky.errors)
+    assert roster.usable("sneaky") is None
 
 
 def test_unreadable_front_matter_is_an_error_not_a_healthy_agent(tmp_path):
     root = tmp_path / "agents"
     _write(root, "broken", "---\nname: [unclosed\n---\nbody\n")
     roster = load_agents(root)
-    assert roster.agents == []
     assert roster.errors
+    broken = roster.by_id("broken")
+    assert broken is not None and broken.enabled is False
+    assert broken.errors
+    assert roster.usable("broken") is None
 
 
 def test_two_files_claiming_one_slug_do_not_both_load(tmp_path):

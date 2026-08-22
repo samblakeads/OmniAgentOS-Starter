@@ -423,7 +423,12 @@ def load_agents(root: Path | str | None, library=None) -> AgentRoster:
             in_builtin_dir = "_builtin" in path.relative_to(root).parts
             agent = parse_agent(path, builtin=in_builtin_dir)
         except Exception as exc:
+            # Not dropped. An agent that vanishes from the roster is
+            # indistinguishable from one nobody ever wrote, and the operator is
+            # left comparing a directory listing with a UI. It appears, disabled,
+            # carrying the reason — the same treatment a missing skill gets.
             roster.errors.append(f"{path.name}: {exc}")
+            roster.agents.append(_unloadable(path, root, str(exc)))
             continue
         if in_builtin_dir and agent.slug == BUILTIN_AGENT_SLUG:
             roster.builtin = agent
@@ -442,6 +447,24 @@ def load_agents(root: Path | str | None, library=None) -> AgentRoster:
         roster.agents.append(agent)
     roster.agents.sort(key=lambda a: a.slug)
     return roster
+
+
+def _unloadable(path: Path, root: Path, reason: str) -> Agent:
+    """A placeholder for a roster file that could not be parsed at all."""
+    slug = safe_agent_slug(path.stem) or "unreadable-agent"
+    return Agent(
+        slug=slug,
+        name=path.stem,
+        title="",
+        persona="",
+        skills=[],
+        tools=[],
+        memory_scope=slug,
+        body="",
+        path=str(path),
+        enabled=False,
+        errors=[reason],
+    )
 
 
 def missing_skills(agent: Agent, library) -> list[str]:
@@ -470,10 +493,19 @@ class AgentStore:
         self.root.mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------------ paths
-    def path_for(self, slug: str) -> Path:
+    def path_for(self, slug: str, canonical_only: bool = False) -> Path:
         safe = safe_agent_slug(slug)
         if not safe:
             raise AgentError("BAD_REQUEST", "an agent slug must contain at least one letter or digit")
+        if canonical_only and safe != str(slug):
+            # `riley!!!` is not a way of spelling `riley`. Canonicalising it on a
+            # GET or a DELETE means a caller can address one agent by many names,
+            # and a DELETE that "worked" on a slug nobody stored is the shape of
+            # an accident nobody notices until the file is gone.
+            raise AgentError(
+                "BAD_REQUEST",
+                f"{str(slug)[:64]!r} is not an agent id; ids are lower-case letters, digits and hyphens",
+            )
         target = (self.root / f"{safe}.md").resolve()
         if target.parent != self.root or not target.is_relative_to(self.root):
             raise AgentError("BAD_REQUEST", "agent slug resolves outside the roster directory")
@@ -496,6 +528,10 @@ class AgentStore:
         reject_path_shaped("name", name)
         if payload.get("slug"):
             reject_path_shaped("slug", payload["slug"])
+        if slug:
+            # duplicate() passes its slug as an ARGUMENT rather than in the
+            # payload, so checking only the payload left that one door open.
+            reject_path_shaped("slug", slug)
         title = str(payload.get("title") or "").strip()[:MAX_TITLE_CHARS]
         # An explicit slug always wins; otherwise it is derived from name+title,
         # which is what the operator actually typed into the form.
@@ -530,6 +566,7 @@ class AgentStore:
         agent = self.build(payload)
         self._ready()
         self._require_known_skills(agent, library)
+        self._refuse_builtin_slug(agent.slug)
         path = self.path_for(agent.slug)
         if path.exists():
             raise AgentError("AGENT_EXISTS", f"an agent named {agent.slug!r} already exists", status=409)
@@ -603,6 +640,7 @@ class AgentStore:
             slug=payload.get("slug") or default_slug or None,
         )
         self._require_known_skills(clone, library)
+        self._refuse_builtin_slug(clone.slug)
         path = self.path_for(clone.slug)
         if path.exists():
             raise AgentError("AGENT_EXISTS", f"an agent named {clone.slug!r} already exists", status=409)
@@ -624,6 +662,22 @@ class AgentStore:
             raise AgentError("AGENT_NOT_FOUND", f"no agent {safe!r}", status=404)
         path.unlink()
         return safe
+
+    @staticmethod
+    def _refuse_builtin_slug(slug: str) -> None:
+        """A roster file may not take the built-in's id.
+
+        Writing one produced a shadow: a file on disk that the loader then
+        reported as a duplicate and skipped, so the operator had an agent they
+        could see in the directory and never in the product. The same 409 the
+        name would get from any other collision is the honest answer.
+        """
+        if slug == BUILTIN_AGENT_SLUG:
+            raise AgentError(
+                "AGENT_EXISTS",
+                f"{BUILTIN_AGENT_SLUG!r} is the built-in agent's id and cannot be reused",
+                status=409,
+            )
 
     @staticmethod
     def _require_known_skills(agent: Agent, library) -> None:

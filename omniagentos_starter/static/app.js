@@ -195,6 +195,7 @@
       state.agents = data.agents || [];
       renderAgents();
       fillAgentPicker();
+      updateAgentHint();
       return state.agents;
     }).catch(function () {
       el("agents-list").innerHTML =
@@ -209,7 +210,9 @@
       return;
     }
     host.innerHTML = state.agents.map(function (a) {
-      var skills = (a.skills || []).length ? esc((a.skills || []).join(", ")) : "router's choice";
+      var skills = (a.skills || []).length
+        ? esc((a.skills || []).join(", "))
+        : "no skills declared · the router may choose from the whole library";
       var lessons = typeof a.lessons === "number" ? a.lessons : 0;
       // A disabled agent is SHOWN and says why. Hiding it would look exactly
       // like nobody ever created it.
@@ -257,6 +260,47 @@
     card.classList.add("just-saved");
     if (card.scrollIntoView) { card.scrollIntoView({ block: "center" }); }
     window.setTimeout(function () { card.classList.remove("just-saved"); }, 4000);
+  }
+
+  /* Who will actually run this, said BEFORE Run is pressed.
+     Two channels can assign a run — the picker and an @slug in the goal — and
+     until the operator could see which one won, the picker could say "let the
+     router decide" while a leftover @slug quietly assigned somebody. */
+  function mentionedSlug() {
+    var match = /^\s*@([A-Za-z0-9_-]{1,64})\b/.exec(el("goal").value || "");
+    return match ? match[1].toLowerCase() : "";
+  }
+
+  function agentLabel(agent) {
+    return agent.name + (agent.title ? " · " + agent.title : "");
+  }
+
+  function updateAgentHint() {
+    var hint = el("agent-resolved");
+    if (!hint) { return; }
+    var picker = el("agent-picker");
+    var picked = picker ? picker.value : "";
+    var mention = mentionedSlug();
+    hint.className = "agent-resolved muted";
+    if (picked) {
+      var chosen = agentById(picked);
+      hint.textContent = "will run as " + (chosen ? agentLabel(chosen) : picked) +
+        (mention && mention !== picked ? " — the picker overrides @" + mention + " in the goal" : "");
+      return;
+    }
+    if (!mention) {
+      hint.textContent = "";
+      return;
+    }
+    var resolved = agentById(mention);
+    if (resolved) {
+      hint.textContent = "will run as " + agentLabel(resolved) + " — from @" + mention + " in the goal";
+      return;
+    }
+    // Named and unresolvable: say so here rather than letting the server refuse
+    // it after the operator has committed to a run.
+    hint.className = "agent-resolved bad";
+    hint.textContent = "no agent @" + mention + " — this run will be refused; pick one above or fix the name";
   }
 
   function agentById(slug) {
@@ -337,7 +381,10 @@
       closeAgentForm();
       loadAgents().then(function () {
         var picker = el("agent-picker");
-        if (picker && res.body.id) { picker.value = res.body.id; }
+        // Only when the operator had not already chosen someone. Quietly
+        // repointing a deliberate selection at whatever was just saved is how a
+        // run gets handed to the wrong agent.
+        if (picker && res.body.id && !picker.value) { picker.value = res.body.id; }
         // Duplicate is a two-step flow (prefill, then Save), so the result has
         // to be findable: scroll the new card into view and mark it, or the
         // operator is left scanning a roster for what just happened.
@@ -956,6 +1003,8 @@
   el("goal").addEventListener("keydown", function (e) {
     if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { startRun(); }
   });
+  el("goal").addEventListener("input", updateAgentHint);
+  el("agent-picker").addEventListener("change", updateAgentHint);
 
   bootstrapToken().then(function () {
     // Skills first: the agent form's multi-select is built from the library.

@@ -114,9 +114,10 @@ def test_a_migrated_database_supports_everything_the_new_code_needs(tmp_path):
     lesson = memory.save_lesson("new-run", "A NEW LESSON", ["t"], GOAL, agent_id="riley")
     assert lesson.agent_id == "riley"
     assert lesson.memory_scope == "riley"
-    recalled = memory.recall(GOAL, k=3, agent_id="riley")
-    assert "A NEW LESSON" in [x.text for x in recalled]
-    assert "A LESSON FROM v0.1.0" in [x.text for x in recalled], "old lessons stay reachable"
+    # Riley has one of its own, so that is the whole answer...
+    assert [x.text for x in memory.recall(GOAL, k=3, agent_id="riley")] == ["A NEW LESSON"]
+    # ...and the pre-upgrade lesson is still reachable by anyone without a scope.
+    assert "A LESSON FROM v0.1.0" in [x.text for x in memory.recall(GOAL, k=3)]
     assert memory.lesson_counts_by_agent()["riley"] == 1
     memory.close()
 
@@ -305,10 +306,13 @@ def test_two_agents_that_do_not_share_a_scope_do_not_share_lessons(tmp_path):
 
     top = memory.recall(GOAL, k=1, agent_id="max", memory_scope="sales-team")
     assert [lesson.text for lesson in top] == ["SALES LESSON"]
-    # The other scope is still REACHABLE — a scope is a preference, not a wall,
-    # and a lesson nobody can ever see is a lesson nobody should have saved.
-    both = memory.recall(GOAL, k=5, agent_id="max", memory_scope="sales-team")
-    assert {lesson.text for lesson in both} == {"SALES LESSON", "SUPPORT LESSON"}
+    # A scope with something relevant of its own is NOT padded from the other
+    # scope, even when there is room in k. Sales asked for sales.
+    room = memory.recall(GOAL, k=5, agent_id="max", memory_scope="sales-team")
+    assert {lesson.text for lesson in room} == {"SALES LESSON"}
+    # A scope with nothing of its own still falls back to the shared pool.
+    empty = memory.recall(GOAL, k=5, agent_id="new", memory_scope="brand-new-team")
+    assert {lesson.text for lesson in empty} == {"SALES LESSON", "SUPPORT LESSON"}
     memory.close()
 
 

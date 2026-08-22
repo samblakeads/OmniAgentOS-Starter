@@ -287,9 +287,11 @@ async def test_an_agent_prefers_its_own_lessons_but_still_sees_the_shared_pool(s
     memory.finish_run("r-riley", "done", verified=True)
     memory.save_lesson("r-riley", "RILEY LESSON", [], REFUND_GOAL, agent_id=RILEY_SLUG)
 
+    # An agent that HAS relevant lessons of its own gets only those. Padding the
+    # remaining k slots from the shared pool is how a deliberately scoped memory
+    # leaks: the operator asked for Riley's experience, not everyone's.
     mine = memory.recall(REFUND_GOAL, k=2, agent_id=RILEY_SLUG)
-    assert mine[0].text == "RILEY LESSON", [lesson.text for lesson in mine]
-    assert "GLOBAL LESSON" in [lesson.text for lesson in mine], "the shared pool is still reachable"
+    assert [lesson.text for lesson in mine] == ["RILEY LESSON"]
 
     # An agent with nothing of its own falls back rather than starting blank.
     other = memory.recall(REFUND_GOAL, k=2, agent_id="someone-else")
