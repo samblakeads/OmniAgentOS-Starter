@@ -77,6 +77,24 @@ in this working tree.
   the shipped roster (`tmp_agents_root()` in `_harness.py`, mirroring the D6
   skills-ablation pattern) — the real shipped `agents/` tree is never mutated
   by this oracle.
+- **tmp_agents_root() exclusions (observed r7 failure, fixed):** the tmp
+  copy of the shipped roster excludes `README.md` (documentation, not an
+  agent) AND any file whose front-matter `name:` starts with `Riley`
+  (case-insensitive). A concurrent browser/oracle session had previously
+  created `riley-meal-prep-support.md` directly in the real `<repo>/agents/`
+  tree; the naive `shutil.copytree` inherited it into what was supposed to
+  be an isolated tmp root, and DEMO beat 0's `POST /api/agents` then 409'd
+  against that stray, racy file. Beat 0 always creates its own Riley fresh
+  inside the isolated root — it must never rely on (or accidentally inherit)
+  one that already exists.
+- **Idempotent beat-0 agent creation:** test_d09/test_d12 (and any future
+  caller) use `create_agent_idempotent()`, never a bare `create_agent()`
+  call, for beat 0. On a `POST /api/agents` 409, it `DELETE`s the exact
+  colliding slug (parsed from the error body, falling back to `slugify(name)`)
+  and retries, asserting **HTTP 201** on the retry. It NEVER silently reuses
+  a pre-existing agent file of unknown content/skills/persona. If the DELETE
+  itself is refused (e.g. the collision is actually a protected builtin),
+  the test fails loudly with the refusal reason rather than proceeding.
 - **Builtin agent:** `agents/_builtin/general-worker.md` must always be
   present under whatever root is active (shipped copy, or synthesized by the
   harness when `agents/` doesn't exist yet in the red-first state). `DELETE`

@@ -904,6 +904,28 @@ def agents_root() -> Path:
     raise AssertionError("agents/ directory missing at repo root")
 
 
+_RILEY_NAME_RE = re.compile(r'(?im)^name:\s*["\']?Riley\b')
+
+
+def _tmp_agents_ignore(dirpath: str, names: list[str]) -> set[str]:
+    """shutil.copytree ignore callback: drop README.md and any Riley-named
+    test artifact so tmp_agents_root() never inherits stray/racy files."""
+    ignore: set[str] = set()
+    for n in names:
+        if n.lower() == "readme.md":
+            ignore.add(n)
+            continue
+        p = Path(dirpath) / n
+        if p.is_file() and n.lower().endswith(".md"):
+            try:
+                head = p.read_text(encoding="utf-8", errors="replace")[:2000]
+            except OSError:
+                continue
+            if _RILEY_NAME_RE.search(head):
+                ignore.add(n)
+    return ignore
+
+
 def tmp_agents_root() -> Path:
     """Copy the shipped agents/ roster into a fresh tmp dir.
 
@@ -922,12 +944,15 @@ def tmp_agents_root() -> Path:
     if src.is_dir():
         # README.md is documentation, not an agent — exclude it from the
         # tmp copy so a created-agent lookup can never match it by accident
-        # (e.g. its prose mentioning a test agent's name).
-        shutil.copytree(
-            src,
-            dest,
-            ignore=shutil.ignore_patterns("README.md", "readme.md"),
-        )
+        # (e.g. its prose mentioning a test agent's name). Also exclude any
+        # file whose front-matter `name:` starts with "Riley" — a test-
+        # created artifact from a concurrent browser/oracle session that
+        # landed in the REAL <repo>/agents/ tree (observed: a live D15/D9/
+        # D12 run collided on `riley-meal-prep-support.md`). The tmp copy
+        # must never inherit an artifact of unknown/racy provenance — DEMO
+        # beat 0 creates its own Riley fresh every run via create_agent_
+        # idempotent() below.
+        shutil.copytree(src, dest, ignore=_tmp_agents_ignore)
     else:
         builtin = dest / "_builtin"
         builtin.mkdir(parents=True, exist_ok=True)
@@ -1044,6 +1069,84 @@ def create_agent(
         raise AssertionError(f"POST /api/agents response missing slug/id: {data!r}")
     data["slug"] = str(slug)
     return data
+
+
+def create_agent_idempotent(
+    base_url: str,
+    name: str,
+    title: str,
+    persona: str,
+    skills: list[str],
+    tools: list[str] | None = None,
+) -> dict[str, Any]:
+    """create_agent(), but tolerant of a pre-existing slug collision (409).
+
+    A prior/concurrent session (another test process, a live browser demo,
+    etc.) can leave an agent of the SAME derived slug already present under
+    whatever agents root is active. This must NEVER silently reuse that
+    pre-existing file (its content/skills/persona are unknown and could be
+    stale or belong to an unrelated run): on 409 it DELETEs the exact
+    colliding slug and re-creates, asserting HTTP 201 on the retry. If the
+    DELETE itself is refused (e.g. the collision is actually a protected
+    builtin), this fails loudly with the refusal reason rather than
+    proceeding with an agent of unknown provenance.
+    """
+    body: dict[str, Any] = {"name": name, "title": title, "persona": persona, "skills": skills}
+    if tools is not None:
+        body["tools"] = tools
+    resp = post_json(base_url, "/api/agents", body)
+    if resp.status_code in (200, 201):
+        data = resp.json()
+        if not isinstance(data, dict):
+            raise AssertionError(f"POST /api/agents must return an object, got {data!r}")
+        slug = data.get("slug") or data.get("id")
+        if not slug:
+            raise AssertionError(f"POST /api/agents response missing slug/id: {data!r}")
+        data["slug"] = str(slug)
+        return data
+
+    if resp.status_code == 409:
+        colliding_slug: str | None = None
+        try:
+            err = resp.json()
+            for key in ("slug", "id"):
+                val = err.get(key) if isinstance(err, dict) else None
+                if isinstance(val, str) and val:
+                    colliding_slug = val
+                    break
+            if colliding_slug is None and isinstance(err, dict):
+                detail = err.get("detail") or err.get("message") or ""
+                if isinstance(detail, str) and detail.strip():
+                    colliding_slug = detail.strip().split()[-1]
+        except Exception:
+            pass
+        if not colliding_slug:
+            colliding_slug = slugify(name)
+
+        del_resp = httpx.delete(base_url + f"/api/agents/{colliding_slug}", timeout=15.0)
+        if del_resp.status_code not in (200, 204):
+            raise AssertionError(
+                f"POST /api/agents 409 collision on slug {colliding_slug!r}, and DELETE "
+                f"was refused (HTTP {del_resp.status_code}: {del_resp.text[:400]}) — "
+                "refusing to silently reuse a pre-existing agent file of unknown content"
+            )
+
+        retry = post_json(base_url, "/api/agents", body)
+        if retry.status_code != 201:
+            raise AssertionError(
+                f"POST /api/agents retry after clearing 409 collision on "
+                f"{colliding_slug!r} must be 201, got {retry.status_code}: {retry.text[:400]}"
+            )
+        data = retry.json()
+        if not isinstance(data, dict):
+            raise AssertionError(f"POST /api/agents retry must return an object, got {data!r}")
+        slug = data.get("slug") or data.get("id")
+        if not slug:
+            raise AssertionError(f"POST /api/agents retry response missing slug/id: {data!r}")
+        data["slug"] = str(slug)
+        return data
+
+    raise AssertionError(f"POST /api/agents -> HTTP {resp.status_code}: {resp.text[:800]}")
 
 
 def first_real_skill() -> tuple[str, str]:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from _harness import (
     collect_sse,
-    create_agent,
+    create_agent_idempotent,
     event_type,
     live_xai_base_url_ok,
     parse_demo_goals_full,
@@ -31,7 +31,7 @@ def test_d12_demo_goals_clock_from_sse():
             agent_id = None
             if agent_slug:
                 display_name = agent_slug.replace("-", " ").replace("_", " ").title()
-                agent = create_agent(
+                agent = create_agent_idempotent(
                     srv.base_url,
                     name=display_name,
                     title="Meal-Prep Support",

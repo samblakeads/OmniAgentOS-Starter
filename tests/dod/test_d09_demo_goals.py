@@ -8,7 +8,7 @@ import httpx
 from _harness import (
     check_planted_criterion,
     collect_sse,
-    create_agent,
+    create_agent_idempotent,
     event_payload,
     event_type,
     events_of,
@@ -55,7 +55,7 @@ def test_d09_three_demo_goals_bijection_and_loop():
                 # not the literal DEMO.md string, so this is decoupled
                 # from the implementer's slugify() algorithm.
                 display_name = agent_slug.replace("-", " ").replace("_", " ").title()
-                agent = create_agent(
+                agent = create_agent_idempotent(
                     srv.base_url,
                     name=display_name,
                     title="Meal-Prep Support",
