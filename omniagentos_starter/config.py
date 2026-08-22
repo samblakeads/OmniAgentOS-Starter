@@ -183,8 +183,10 @@ def assets_dir(env: dict | None = None) -> Path:
     override = _env(env, "OMNIAGENTOS_ASSETS_DIR")
     if override:
         return Path(override).expanduser().resolve()
+    # Repo checkout first (that is the copy you edit), then the snapshot setup.py
+    # put inside the package when a wheel was built.
     found = _first_existing(Path.cwd() / "assets", REPO_ROOT / "assets", PACKAGE_DIR / "assets")
-    return found or (REPO_ROOT / "assets")
+    return found or (PACKAGE_DIR / "assets")
 
 
 def skills_dir(env: dict | None = None) -> Path:
@@ -192,8 +194,12 @@ def skills_dir(env: dict | None = None) -> Path:
     override = _env(env, "OMNIAGENTOS_SKILLS_ROOT") or _env(env, "OMNIAGENTOS_SKILLS_DIR")
     if override:
         return Path(override).expanduser().resolve()
-    found = _first_existing(Path.cwd() / "skills", REPO_ROOT / "skills")
-    return found or (REPO_ROOT / "skills")
+    # Same order as assets_dir(): the checkout wins, the packaged snapshot is the
+    # fallback that makes `pip install omniagentos-starter` from a wheel work at
+    # all — without it the library scanned site-packages/skills, found nothing,
+    # and every run silently fell back to the single built-in pack.
+    found = _first_existing(Path.cwd() / "skills", REPO_ROOT / "skills", PACKAGE_DIR / "skills")
+    return found or (PACKAGE_DIR / "skills")
 
 
 def static_dir() -> Path:

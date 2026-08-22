@@ -22,6 +22,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -36,6 +37,50 @@ from omniagentos_starter.config import VERSION, Settings, skills_dir  # noqa: E4
 from omniagentos_starter.redact import contains_secret, redact  # noqa: E402
 
 RECEIPT_MAGIC = "OMNIAGENTOS-RECEIPT-1"
+# An absolute local path fingerprints the machine that produced the receipt, and a
+# receipt is a published artifact (slides, chat, git).
+LOCAL_PATH_RE = re.compile(r"(?<![:\w/])/(?:Users|home|private|var|tmp|opt)/[^\s\"',)]{2,}")
+WINDOWS_PATH_RE = re.compile(r"[A-Za-z]:\\Users\\[^\s\"',)]{2,}")
+SECRET_BEARING_FLAGS = ("--token", "--api-key", "--key")
+
+
+def scrub_argv(argv: list[str]) -> list[str]:
+    """The command line, with the value of every secret-bearing flag removed.
+
+    redact() only knows the secrets it was told about, and a token supplied ONLY
+    as `--token <value>` was never in the environment — so it survived redaction
+    and was written into the receipt verbatim, next to a live-key workflow.
+    """
+    out: list[str] = []
+    swallow = False
+    for arg in argv:
+        if swallow:
+            out.append("[REDACTED]")
+            swallow = False
+            continue
+        flag = arg.split("=", 1)[0]
+        if flag in SECRET_BEARING_FLAGS:
+            if "=" in arg:
+                out.append(f"{flag}=[REDACTED]")
+            else:
+                out.append(arg)
+                swallow = True
+            continue
+        out.append(arg)
+    return out
+
+
+def scrub_paths(value):
+    """Erase absolute local paths anywhere in the receipt."""
+    if isinstance(value, str):
+        return WINDOWS_PATH_RE.sub("<path>", LOCAL_PATH_RE.sub("<path>", value))
+    if isinstance(value, dict):
+        return {k: scrub_paths(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [scrub_paths(v) for v in value]
+    return value
+
+
 ROLE_EVENTS = {
     "planner": ("planner.plan",),
     "worker": ("worker.started", "worker.finished", "worker.delta"),
@@ -54,7 +99,12 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--max-rounds", type=int, default=None)
     p.add_argument("--data-dir", default="var", help="data directory when running in-process")
     p.add_argument("--token", default=os.environ.get("OMNIAGENTOS_TOKEN", ""))
-    p.add_argument("--timeout", type=float, default=300.0, help="seconds to wait for run.done")
+    p.add_argument(
+        "--timeout",
+        type=float,
+        default=300.0,
+        help="WALL-CLOCK seconds to wait for run.done (SSE keepalives do not reset it)",
+    )
     p.add_argument("--demo", action="store_true", help="drive the bundled replay instead of a live run")
     p.add_argument("--in-process", action="store_true", help="never use HTTP; drive the engine directly")
     args = p.parse_args(argv)
@@ -94,6 +144,10 @@ def drive_http(args, receipt: dict) -> tuple[list[dict], dict, str]:
         receipt["run_id"] = run_id
 
         events: list[dict] = []
+        # --timeout is a WALL-CLOCK deadline. httpx's timeout is idle-read, and the
+        # SSE endpoint sends a keepalive comment every 15s, so a hung run reset it
+        # for ever and the drill waited past the end of the stage slot.
+        deadline = t0 + float(args.timeout)
         with httpx.Client(base_url=base, headers=headers, timeout=args.timeout) as stream_client:
             with stream_client.stream("GET", f"/api/runs/{run_id}/events") as response:
                 receipt["sse_status"] = response.status_code
@@ -102,6 +156,11 @@ def drive_http(args, receipt: dict) -> tuple[list[dict], dict, str]:
                     "x-accel-buffering": response.headers.get("x-accel-buffering"),
                 }
                 for line in response.iter_lines():
+                    if time.monotonic() > deadline:
+                        receipt["timed_out"] = True
+                        receipt["error_tag"] = "TIMEOUT"
+                        receipt["error"] = f"no terminal event within {args.timeout}s of wall clock"
+                        break
                     if not line.startswith("data:"):
                         continue
                     event = json.loads(line[5:].strip())
@@ -177,7 +236,7 @@ def main(argv=None) -> int:
         "magic": RECEIPT_MAGIC,
         "kind": "drill",
         "git_head": git_head(REPO_ROOT),
-        "argv": list(sys.argv),
+        "argv": scrub_argv(list(sys.argv)),
         "base_url": args.base_url.rstrip("/"),
         "goal": args.goal,
         "started_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -201,7 +260,20 @@ def main(argv=None) -> int:
             receipt["error"] = f"no server to replay against: {type(exc).__name__}"
             return finish(receipt, args.out, 2)
         receipt["http_unavailable"] = type(exc).__name__
-        events, summary, run_id = drive_in_process(args, receipt)
+        try:
+            events, summary, run_id = drive_in_process(args, receipt)
+        except Exception as inner:  # a crash with no receipt is a crash nobody can audit
+            receipt["status"] = "failed"
+            receipt["error_tag"] = "INTERNAL_ERROR"
+            receipt["error"] = redact(f"{type(inner).__name__}: {inner}")[:400]
+            return finish(receipt, args.out, 2)
+    except Exception as exc:
+        # ReadTimeout, HTTPStatusError, JSONDecodeError: every one of these used to
+        # end the process with no receipt at all, which reads as "never ran".
+        receipt["status"] = "failed"
+        receipt["error_tag"] = "STREAM_ERROR"
+        receipt["error"] = redact(f"{type(exc).__name__}: {exc}")[:400]
+        return finish(receipt, args.out, 2)
 
     for event in events:
         if event.get("type") == "llm.call":
@@ -232,8 +304,8 @@ def main(argv=None) -> int:
             "repair_dispatched": types.count("repair.dispatched"),
         }
     )
-    receipt["t_first_event_ms"] = receipt["t_first_event_ms"] or 0
-    receipt["t_done_ms"] = receipt["t_done_ms"] or 0
+    # A missing timing stays null. `or 0` made "no event ever arrived" look
+    # exactly like "the first event arrived in under a millisecond".
     if terminal.get("type") == "run.failed":
         receipt["error_tag"] = terminal.get("error_tag")
         receipt["error"] = redact(terminal.get("message", ""))[:400]
@@ -248,6 +320,15 @@ def main(argv=None) -> int:
         problems.append("no provider call returned HTTP 200")
     if not (deliverable or "").strip():
         problems.append("the deliverable is empty")
+    if receipt.get("t_first_event_ms") is None:
+        problems.append("no event ever arrived")
+    if receipt.get("t_done_ms") is None:
+        problems.append("no terminal event arrived")
+    if receipt.get("timed_out"):
+        problems.append(f"wall-clock timeout after {args.timeout}s")
+    if not bool(summary.get("verified")):
+        # `done` is not the same as signed off.
+        problems.append("the run was not verified")
     receipt["problems"] = problems
 
     return finish(receipt, args.out, 0 if not problems else 1)
@@ -258,10 +339,11 @@ def finish(receipt: dict, out: str, code: int) -> int:
     receipt["finished_utc"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     receipt.setdefault("health_json", {})
     receipt.setdefault("run_id", "")
-    receipt["t_first_event_ms"] = receipt.get("t_first_event_ms") or 0
-    receipt["t_done_ms"] = receipt.get("t_done_ms") or 0
+    receipt.setdefault("t_first_event_ms", None)
+    receipt.setdefault("t_done_ms", None)
     receipt.setdefault("deliverable_sha256", hashlib.sha256(b"").hexdigest())
-    receipt = redact(receipt)
+    receipt["argv"] = scrub_argv(list(receipt.get("argv") or []))
+    receipt = scrub_paths(redact(receipt))
     if contains_secret(receipt):  # belt and braces: a receipt is a published artifact
         print("refusing to write a receipt containing a secret", file=sys.stderr)
         return 3

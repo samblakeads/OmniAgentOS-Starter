@@ -43,6 +43,22 @@ REQUIRED = ("run.started", "planner.plan", "worker.delta", "critic.verdict", "ve
 LOCAL_PATH_RE = re.compile(r"(?<![:\w/])/(?:Users|home|private|var|tmp|opt)/[^\s\"',)]{2,}")
 
 
+def sequence_of(event: dict) -> int:
+    """The stream's own sequence number.
+
+    On the wire it is `event_id`. `id` belongs to whatever the payload is about
+    (a lesson, for instance) — reading it here raised KeyError on the very first
+    event, so the bundled demo could not be regenerated at all, and if a payload
+    ever did carry an `id` the recording would have been silently wrong instead.
+    """
+    seq = event.get("event_id")
+    if seq is None:
+        raise SystemExit(
+            f"SSE event {event.get('type')!r} carries no event_id; refusing to guess a sequence number"
+        )
+    return int(seq)
+
+
 def scrub(value):
     """Redact secrets, then erase anything that looks like a local absolute path."""
     value = redact(value)
@@ -66,6 +82,8 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--from-run", default="", help="bundle a run already stored in the database")
     p.add_argument("--data-dir", default="var", help="database directory for --from-run")
     p.add_argument("--allow-partial", action="store_true", help="record even if a role is missing")
+    p.add_argument("--provider", default="", help="provider name for --from-run (else read from llm.call events)")
+    p.add_argument("--model", default="", help="model name for --from-run (else read from llm.call events)")
     return p.parse_args(argv)
 
 
@@ -85,16 +103,24 @@ def capture_live(args) -> tuple[list[dict], str, dict]:
         run_id = created.json()["run_id"]
 
         t0 = time.monotonic()
+        # A wall-clock deadline, not httpx's idle-read timeout: the SSE endpoint
+        # sends a keepalive every 15s, which reset the read timeout for ever, so a
+        # hung run recorded until somebody noticed.
+        deadline = t0 + float(args.timeout)
         captured: list[dict] = []
         with httpx.Client(base_url=base, headers=headers, timeout=args.timeout) as stream_client:
             with stream_client.stream("GET", f"/api/runs/{run_id}/events") as response:
                 for line in response.iter_lines():
+                    if time.monotonic() > deadline:
+                        raise SystemExit(
+                            f"no terminal event within {args.timeout}s; refusing to bundle a partial capture"
+                        )
                     if not line.startswith("data:"):
                         continue
                     event = json.loads(line[5:].strip())
                     captured.append(
                         {
-                            "id": event["id"],
+                            "id": sequence_of(event),
                             "offset_ms": int((time.monotonic() - t0) * 1000),
                             "type": event["type"],
                             "payload": event.get("payload") or {},
@@ -124,7 +150,24 @@ def capture_stored(args) -> tuple[list[dict], str, dict]:
         }
         for e in events
     ]
-    return captured, args.from_run, {"provider": "xai", "model": "grok-4.3", "goal": stored["goal"]}
+    # provider/model are NOT stored on the run row, so there is nothing here to
+    # read them from. Inventing "xai"/"grok-4.3" would put a claim in the public
+    # replay bundle that the recording cannot support — and the stage copy says
+    # "this is a real grok-4.3 run" out loud.
+    provider = args.provider
+    model = args.model
+    if not provider or not model:
+        for event in reversed(captured):
+            if event["type"] == "llm.call":
+                provider = provider or event["payload"].get("provider")
+                model = model or event["payload"].get("model")
+                break
+    if not provider or not model:
+        raise SystemExit(
+            f"run {args.from_run} does not record which provider answered; "
+            "pass --provider and --model explicitly"
+        )
+    return captured, args.from_run, {"provider": provider, "model": model, "goal": stored["goal"]}
 
 
 def main(argv=None) -> int:
@@ -151,6 +194,13 @@ def main(argv=None) -> int:
         "recorded_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "provider": health.get("provider"),
         "model": health.get("model"),
+        "verified": bool(
+            next(
+                (e["payload"].get("verified") for e in reversed(captured) if e["type"] == "run.done"),
+                False,
+            )
+            is True
+        ),
         "events": captured,
     }
     recording = scrub(recording)
