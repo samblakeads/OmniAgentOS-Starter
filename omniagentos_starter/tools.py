@@ -21,6 +21,7 @@ MAX_FILE_BYTES = 256 * 1024
 MAX_FILES_PER_RUN = 50
 MAX_REL_LEN = 255
 MAX_DEPTH = 8
+RUNS_DIR_NAME = "runs"
 
 # What the kernel says when O_NOFOLLOW meets a symlink: ELOOP on Linux, EMLINK on
 # some BSDs, EFTYPE on others.
@@ -93,6 +94,19 @@ class WorkspaceGuard:
                 raise WorkspaceRefused(
                     f"refusing workspace root {resolved}: it contains {bad}"
                 )
+        # A per-run workspace owns one run's files. A root that CONTAINS the runs
+        # tree is the whole fleet's tree, not one run's box — handing that to a
+        # guard means every path inside it is "contained" and the guard obediently
+        # writes anywhere in it. The `base=` pin below catches this when a caller
+        # knows the tree; this catches it when nobody passed one.
+        #
+        # A real run root is itself inside `runs/`, so a worker that writes into
+        # `<run>/runs/…` cannot lock itself out of its own workspace.
+        if (resolved / "runs").is_dir() and resolved.parent.name != RUNS_DIR_NAME:
+            raise WorkspaceRefused(
+                f"refusing workspace root {resolved}: it contains the runs/ tree, so it is the "
+                "parent of every run's workspace rather than one run's own directory"
+            )
         if base is not None:
             # Defence in depth. The guard polices what happens INSIDE its root,
             # so a guard rooted at /etc is a perfectly obedient guard over /etc:
@@ -222,7 +236,22 @@ def safe_run_id(run_id: str) -> str:
 
 
 def runs_root(workspace_dir: Path | str) -> Path:
-    return (Path(workspace_dir) / "runs").resolve()
+    return (Path(workspace_dir) / RUNS_DIR_NAME).resolve()
+
+
+def base_for_root(root: Path | str) -> Path | None:
+    """The containment pin implied by a root's own position in the tree.
+
+    `<workspace>/runs/<run_id>` is the shape this package creates, so its parent
+    IS the runs root and can be pinned without the caller knowing anything. A
+    root that is not a per-run directory gets no derived pin — the caller must
+    say, or the forbidden-root rules stand alone. Guessing a pin from a root we
+    do not recognise would produce `base=root.parent`, which contains the root by
+    construction and therefore proves nothing.
+    """
+    resolved = Path(root).expanduser().resolve()
+    parent = resolved.parent
+    return parent if parent.name == RUNS_DIR_NAME else None
 
 
 def workspace_for_run(

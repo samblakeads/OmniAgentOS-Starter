@@ -35,9 +35,9 @@ from .config import (
 )
 from .engine import EventBus, Orchestrator, RunLimit, RunState
 from .llm import LLMClient
-from .redact import redact, register_secret
+from .redact import WorkspaceEscape, redact, register_secret
 from .replay import ReplayUnavailable, replay_into, replay_metadata
-from .tools import WorkspaceGuard, runs_root, safe_run_id
+from .tools import WorkspaceGuard, WorkspaceRefused, runs_root, safe_run_id
 
 PROBE_TTL_SECONDS = 600
 # A failed probe is cached far more briefly than a successful one. Ten minutes of
@@ -494,35 +494,62 @@ def create_app(settings: Settings | None = None, orchestrator: Orchestrator | No
 
         return StreamingResponse(stream(), media_type="text/event-stream", headers=_sse_headers())
 
-    def _workspace(run_id: str) -> WorkspaceGuard | None:
+    def _workspace(run_id: str) -> tuple[WorkspaceGuard | None, dict | None]:
+        """The run's sandbox, or the reason there isn't one.
+
+        Both outcomes are a 404 to the caller, and they used to be the SAME 404:
+        `{"error_tag": "BAD_REQUEST", "message": "unknown run"}`. That made a real
+        run whose workspace the guard refused — a symlinked root, a root inside
+        the data dir, a root too wide to contain — look exactly like a mistyped
+        id. Fail-closed for an attacker either way; for an operator it is the
+        difference between "you typed it wrong" and "this run's sandbox is
+        broken", and only one of those is worth investigating.
+        """
         run = orch.get(run_id)
         if run and run.workspace:
-            return run.workspace
+            return run.workspace, None
         path = run_workspace_dir(settings.workspace_dir, run_id)
         if path is None:
-            return None
+            # `run_workspace_dir` says no for two very different reasons: nothing
+            # is there, or something IS there and it failed containment (a
+            # symlinked run directory is the common shape). lexists() does not
+            # follow the link, so it can tell those apart where resolve() cannot.
+            safe = safe_run_id(run_id)
+            candidate = runs_root(settings.workspace_dir) / safe if safe and safe == str(run_id) else None
+            if candidate is not None and os.path.lexists(candidate):
+                return None, {
+                    "error_tag": "WORKSPACE_REFUSED",
+                    "message": "the run workspace exists but is not a directory inside the runs tree",
+                }
+            return None, {"error_tag": "RUN_NOT_FOUND", "message": "no such run"}
         try:
-            return WorkspaceGuard(
+            guard = WorkspaceGuard(
                 path, data_dir=settings.data_dir, create=False, base=runs_root(settings.workspace_dir)
             )
-        except Exception:
-            return None
+        except WorkspaceRefused as exc:
+            return None, {"error_tag": "WORKSPACE_REFUSED", "message": redact(str(exc))[:300]}
+        except Exception as exc:
+            return None, {
+                "error_tag": "WORKSPACE_REFUSED",
+                "message": f"the run workspace could not be opened ({type(exc).__name__})",
+            }
+        return guard, None
 
     @api.get("/runs/{run_id}/files")
     async def run_files(run_id: str) -> JSONResponse:
-        guard = _workspace(run_id)
+        guard, refusal = _workspace(run_id)
         if guard is None:
             # An empty list would hide the difference between "this run wrote
             # nothing" and "that is not a run id" — and the second one is an
             # attempt to read somewhere it should not.
-            return JSONResponse({"error_tag": "BAD_REQUEST", "message": "unknown run"}, status_code=404)
+            return JSONResponse(redact(refusal), status_code=404)
         return JSONResponse(redact({"run_id": run_id, "files": guard.list_files()}))
 
     @api.get("/runs/{run_id}/files/{file_path:path}")
     async def run_file(run_id: str, file_path: str):
-        guard = _workspace(run_id)
+        guard, refusal = _workspace(run_id)
         if guard is None:
-            return JSONResponse({"error_tag": "BAD_REQUEST", "message": "unknown run"}, status_code=404)
+            return JSONResponse(redact(refusal), status_code=404)
         try:
             # A worker wrote this file, from text a user supplied. It is opened in
             # a browser tab on a projector, so it goes through the redactor like
@@ -531,6 +558,16 @@ def create_app(settings: Settings | None = None, orchestrator: Orchestrator | No
             return PlainTextResponse(body, media_type="text/plain; charset=utf-8")
         except FileNotFoundError:
             return JSONResponse({"error_tag": "BAD_REQUEST", "message": "no such file"}, status_code=404)
+        except WorkspaceEscape as exc:
+            # as_dict() rather than str(exc): the same shape the tool path and the
+            # SSE `tool.error` event carry, so one refusal reads identically
+            # wherever a client meets it.
+            return JSONResponse(redact(exc.as_dict()), status_code=400)
+        except OSError as exc:
+            return JSONResponse(
+                redact({"error_tag": "WORKSPACE_IO_ERROR", "message": type(exc).__name__}),
+                status_code=400,
+            )
         except Exception as exc:
             return JSONResponse(
                 redact({"error_tag": getattr(exc, "error_tag", "BAD_REQUEST"), "message": str(exc)}),

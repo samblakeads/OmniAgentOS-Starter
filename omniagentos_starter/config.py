@@ -50,6 +50,13 @@ ERROR_TAGS = (
     "ROUNDS_EXHAUSTED",
     "REPAIR_UNLOCALISED",
     "WORKSPACE_ESCAPE",
+    # An IO failure on a LEGAL path — a full disk, EACCES, a read-only mount. It
+    # is not an attempted breakout and must not share a tag with one.
+    "WORKSPACE_IO_ERROR",
+    # A workspace that exists but the guard refused (symlinked root, too wide,
+    # inside the data dir) — distinct from "there is no such run".
+    "WORKSPACE_REFUSED",
+    "RUN_NOT_FOUND",
     "REPLAY_FAILED",
     "REPLAY_TRUNCATED",
     "APP_AUTH",

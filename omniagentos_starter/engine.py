@@ -45,7 +45,7 @@ from .llm import Budget, LLMClient
 from .memory import LESSON_PROHIBITION, Memory, lessons_prompt_block
 from .redact import ProviderError, WorkspaceEscape, redact
 from .skills import SkillLibrary, SkillPack, builtin_pack, load_skills
-from .tools import TOOL_NAMES, WorkspaceGuard, WorkspaceRefused, workspace_for_run
+from .tools import TOOL_NAMES, WorkspaceGuard, WorkspaceRefused, base_for_root, workspace_for_run
 
 ROLES = ("planner", "worker", "critic", "verifier")
 
@@ -113,20 +113,35 @@ def verifier_is_verified(payload: Any) -> bool:
     return payload.get("verified") is True
 
 
-def execute_worker_tool(root: str | Path, name: str, arguments: dict | None = None) -> dict:
+def execute_worker_tool(
+    root: str | Path,
+    name: str,
+    arguments: dict | None = None,
+    base: Path | str | None = None,
+    data_dir: Path | str | None = None,
+) -> dict:
     """The worker's tool call path: read_file / write_file / list_files.
 
     This is the ONLY way an agent touches the filesystem, and it is what the
     engine calls for every file block a worker emits. Every rejection comes back
     as a dict carrying ``error_tag`` — never a silent empty success, because a
     tool that quietly does nothing teaches the model that the escape worked.
+
+    The containment pin is not optional. `api._workspace` has always passed
+    ``base=runs_root(...)``; this path did not, so a *too wide* root — the
+    workspace parent, a bare temp dir — was accepted and every path inside it was
+    obediently "contained". Escapes in the ``path`` argument still died in
+    ``resolve()``, which is why the invariant tests stayed green while the
+    sibling was open. ``base`` is now derived from the root's own position when
+    the caller does not supply one, and a root that contains the runs tree is
+    refused outright.
     """
     args = dict(arguments or {})
     tool = str(name or "").strip()
     if tool not in TOOL_NAMES:
         return {"ok": False, "tool": tool, "error_tag": "BAD_REQUEST", "reason": f"unknown tool {tool!r}"}
     try:
-        guard = WorkspaceGuard(root, data_dir=None)
+        guard = WorkspaceGuard(root, data_dir=data_dir, base=base if base is not None else base_for_root(root))
     except WorkspaceRefused as exc:
         return {"ok": False, "tool": tool, "error_tag": "WORKSPACE_ESCAPE", "reason": str(exc)}
 
@@ -143,10 +158,15 @@ def execute_worker_tool(root: str | Path, name: str, arguments: dict | None = No
     except FileNotFoundError:
         return {"ok": False, "tool": tool, "error_tag": "BAD_REQUEST", "reason": "no such file", "path": str(path)}
     except OSError as exc:
+        # A full disk, a read-only mount or EACCES on a path that is perfectly
+        # legal is not an agent trying to leave the box. Tagging it
+        # WORKSPACE_ESCAPE fires every monitor and every log grep that treats
+        # that tag as an attempted breakout — a favourable-absence miss in the
+        # other direction: the alarm that cries wolf is the alarm nobody reads.
         return {
             "ok": False,
             "tool": tool,
-            "error_tag": "WORKSPACE_ESCAPE",
+            "error_tag": "WORKSPACE_IO_ERROR",
             "reason": type(exc).__name__,
             "requested": str(path)[:120],
         }
@@ -958,9 +978,11 @@ class Engine:
         except WorkspaceEscape as exc:
             return self._refuse_write(exc.as_dict(), task_id)
         except OSError as exc:
+            # Same distinction as execute_worker_tool: an IO failure on a legal
+            # path is not an escape attempt, and must not be reported as one.
             return self._refuse_write(
                 {
-                    "error_tag": "WORKSPACE_ESCAPE",
+                    "error_tag": "WORKSPACE_IO_ERROR",
                     "reason": f"{type(exc).__name__}",
                     "requested": str(rel)[:120],
                 },

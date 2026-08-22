@@ -166,6 +166,8 @@ def drive_http(args, receipt: dict) -> tuple[list[dict], dict, str]:
                     event = json.loads(line[5:].strip())
                     if receipt.get("t_first_event_ms") is None:
                         receipt["t_first_event_ms"] = int((time.monotonic() - t0) * 1000)
+                    if event.get("type") == "llm.call" and receipt.get("t_first_llm_ms") is None:
+                        receipt["t_first_llm_ms"] = int((time.monotonic() - t0) * 1000)
                     events.append(event)
                     if event["type"] in ("run.done", "run.failed"):
                         receipt["t_done_ms"] = int((time.monotonic() - t0) * 1000)
@@ -212,6 +214,8 @@ async def _drive_in_process(args, receipt: dict) -> tuple[list[dict], dict, str]
         event = original_emit(etype, payload)
         if receipt.get("t_first_event_ms") is None:
             receipt["t_first_event_ms"] = int((time.monotonic() - t0) * 1000)
+        if etype == "llm.call" and receipt.get("t_first_llm_ms") is None:
+            receipt["t_first_llm_ms"] = int((time.monotonic() - t0) * 1000)
         # same shape the SSE endpoint publishes: payload flattened, canonical keys on top
         from omniagentos_starter.api import sse_data
 
@@ -246,7 +250,14 @@ def main(argv=None) -> int:
         "provider_hosts": [],
         "response_ids": [],
         "status": "unknown",
+        # t_first_event_ms is the first SSE frame of ANY type — it measures stage
+        # presence (the dashboard stopped being blank), and on an already-warm
+        # server it is a local `run.started` in single-digit milliseconds.
+        # t_first_llm_ms is the first `llm.call`: the first moment the production
+        # line actually reached the provider. They answer different questions and
+        # a 17ms first-event is not evidence that the model is working.
         "t_first_event_ms": None,
+        "t_first_llm_ms": None,
         "t_done_ms": None,
     }
 
@@ -322,6 +333,8 @@ def main(argv=None) -> int:
         problems.append("the deliverable is empty")
     if receipt.get("t_first_event_ms") is None:
         problems.append("no event ever arrived")
+    if not args.demo and receipt.get("t_first_llm_ms") is None:
+        problems.append("no llm.call ever arrived — nothing reached the provider")
     if receipt.get("t_done_ms") is None:
         problems.append("no terminal event arrived")
     if receipt.get("timed_out"):
@@ -340,6 +353,7 @@ def finish(receipt: dict, out: str, code: int) -> int:
     receipt.setdefault("health_json", {})
     receipt.setdefault("run_id", "")
     receipt.setdefault("t_first_event_ms", None)
+    receipt.setdefault("t_first_llm_ms", None)
     receipt.setdefault("t_done_ms", None)
     receipt.setdefault("deliverable_sha256", hashlib.sha256(b"").hexdigest())
     receipt["argv"] = scrub_argv(list(receipt.get("argv") or []))
@@ -360,6 +374,7 @@ def finish(receipt: dict, out: str, code: int) -> int:
                     "status",
                     "roles_seen",
                     "t_first_event_ms",
+                    "t_first_llm_ms",
                     "t_done_ms",
                     "llm_calls",
                     "rounds",

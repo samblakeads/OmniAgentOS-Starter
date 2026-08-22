@@ -8,9 +8,10 @@ recording that names a provider it never spoke to, a wheel with no skills in it.
 
 from __future__ import annotations
 
+import pathlib
+import shutil
 import sys
 import tomllib
-import zipfile
 from pathlib import Path
 
 import pytest
@@ -142,11 +143,59 @@ def test_a_checkout_still_wins_over_the_packaged_snapshot():
     assert assets_dir() == REPO_ROOT / "assets"
 
 
-def test_the_built_wheel_has_no_source_tree_left_in_it():
-    wheels = sorted((REPO_ROOT / "dist").glob("*.whl")) if (REPO_ROOT / "dist").is_dir() else []
-    if not wheels:
-        pytest.skip("no wheel built in dist/ — packaging is proved by pip wheel in CI")
-    with zipfile.ZipFile(wheels[-1]) as zf:
-        names = zf.namelist()
-    assert any(n.startswith("omniagentos_starter/skills/") for n in names)
-    assert any(n.endswith("omnirogue-logo.png") for n in names)
+def _bundled_trees() -> list[tuple[str, str]]:
+    """Read setup.py's BUNDLED_TREES without importing it.
+
+    setup.py imports setuptools at module scope, and setuptools is a BUILD
+    dependency — pip builds this project in an isolated environment, so it is not
+    importable from the test venv. Reading the constant with `ast` binds the test
+    to the same literal the hook uses, with nothing to install.
+    """
+    import ast
+
+    tree = ast.parse((REPO_ROOT / "setup.py").read_text(encoding="utf-8"))
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+            getattr(t, "id", "") == "BUNDLED_TREES" for t in node.targets
+        ):
+            return [tuple(pair) for pair in ast.literal_eval(node.value)]
+    raise AssertionError("setup.py no longer defines BUNDLED_TREES")
+
+
+def test_the_trees_the_build_hook_snapshots_exist_and_land_where_package_data_looks(tmp_path):
+    """The packaging contract, end to end, with no wheel and no network.
+
+    This replaces a test that skipped unless a wheel happened to be sitting in
+    dist/ — which is to say, one that ran approximately never. It does not invoke
+    setuptools (a build-isolated dependency); it asserts the three things that
+    have to line up for `pip install` from a wheel to work: the source trees
+    exist, copying them the way the hook copies them produces the package layout,
+    and pyproject's package-data globs match that layout.
+    """
+    config = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    patterns = config["tool"]["setuptools"]["package-data"]["omniagentos_starter"]
+    build_lib = tmp_path / "build" / "omniagentos_starter"
+    build_lib.mkdir(parents=True)
+
+    trees = _bundled_trees()
+    assert {name for name, _ in trees} == {"skills", "assets"}, trees
+    for source_name, dest_name in trees:
+        source = REPO_ROOT / source_name
+        assert source.is_dir(), f"{source_name}/ is missing from the checkout"
+        shutil.copytree(
+            source,
+            build_lib / dest_name,
+            ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".DS_Store"),
+            symlinks=False,
+        )
+
+    packs = sorted(build_lib.glob("skills/*/*.md"))
+    assert len(packs) >= 10, f"a wheel would ship {len(packs)} skill packs: {packs}"
+    assert (build_lib / "assets" / "omnirogue-logo.png").is_file(), "a wheel would ship no logo"
+    assert not any(p.is_symlink() for p in build_lib.rglob("*")), "a snapshot must not contain symlinks"
+
+    # ...and every file above is actually matched by a package-data glob.
+    for relative in ("skills/marketing-content/ad-copy-framework-writer.md", "assets/omnirogue-logo.png"):
+        assert any(pathlib.PurePath(relative).match(pat) for pat in patterns), (
+            f"{relative} is snapshotted into the package but no package-data glob matches it"
+        )
