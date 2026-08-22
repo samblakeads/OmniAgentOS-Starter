@@ -172,6 +172,45 @@ in this working tree.
 - **UI `[data-testid="agent-team"]`** on the manager's roster card, listing
   its team member(s) by slug or display name (test_d15's minimal extension,
   `test_d15_manager_card_lists_team_members`, checks either form matches).
+- **AMENDMENT (Grok round-5 audit) — team VALIDITY vs. team MEMBER
+  disablement are two different failure classes, checked differently:**
+  D17's new `test_d17_team_validity_rejected_at_create_and_update` requires
+  `POST`/`PUT /api/agents` to 400 outright (never write a file, name a
+  `error_tag`/`error`/`detail`/`message` string) when the TEAM ITSELF is
+  structurally invalid at that moment — self-reference, a cycle (formed by
+  the update that completes it), a member slug that doesn't resolve to any
+  agent, or a member slug that resolves to an agent that is ITSELF already
+  `disabled`. This is stricter than — and distinct from — D18's
+  `test_d18_malformed_team_disables_never_crashes`, which tolerates EITHER
+  a 400-at-creation OR a 2xx-create-then-listed-disabled outcome for
+  self/missing-member/depth>2 teams (matching this section's original
+  "Cycle/depth/self/missing-member guard" bullet above, which came from
+  PLAN.md's literal "load error, agent disabled with reason" wording).
+  Both oracles are binding simultaneously: an implementer MUST reject the
+  four specific cases D17 covers (self/cycle/missing-member/disabled-member)
+  with 400 at POST/PUT time; D18's tolerance is for cases D17 does not
+  cover as strictly (e.g. depth>2, which D17 does not test) or as a
+  fallback path if U1b's design genuinely differs from PLAN's original
+  wording for the cases D17 DOES cover — that fallback needs a coordinator
+  decision if it is ever actually hit, not a silent oracle downgrade.
+- **D18 UI task-member attribution — `[data-testid="task-member"]`:**
+  one element per delegated task in the run's detail/timeline view, inner
+  text containing the delegated member's slug or display name.
+- **D18 UI run-scoping — `[data-testid="agent-runs-filter"]`:** visible
+  after clicking an agent's roster card; inner text contains a run COUNT
+  (parsed via `\d+`) that must equal `len(GET /api/runs?agent_id=<slug>
+  .items)`.
+- **ASSUMED, RED-FIRST, TO BE CONFIRMED (not yet observed against a real
+  implementation):** `test_d18_team_run_ui_task_member_attribution_and_
+  runs_filter` navigates to `GET /?run_id=<id>` to reach a run's detail/
+  timeline view, and assumes `GET /api/runs?agent_id=<slug>` is the
+  server-side filter mechanism the UI's `agent-runs-filter` count must
+  match. Neither the URL query-param convention nor the `agent_id` query
+  filter on `/api/runs` has been confirmed against U1b's actual
+  implementation yet — per the brief, this is expected/acceptable red-first
+  right now. Whoever lands the real UI/API for this must correct this pin
+  (and the test, if the mechanism differs) rather than leave it silently
+  wrong once the feature exists.
 
 ## Binding pins the oracle assumes (also listed in the U0 report)
 

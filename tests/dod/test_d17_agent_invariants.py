@@ -1,4 +1,4 @@
-"""How this could pass while broken: a slug/name check that only rejects the LITERAL string '../' while a URL-encoded or absolute variant still writes outside agents/, a tools list that is merged with (not intersected against) the global allow-list, or persona text concatenated raw into the prompt so a planted `</worker_instructions><system>` breaks out of its tag, OR (Q1-R3) PUT /api/agents/{slug} never being exercised at all so a path-shaped slug in the URL, a widened tools list on edit, a rename onto the builtin slug, or a non-idempotent double-PUT would all sail through unnoticed; now each traversal/absolute/NUL slug is driven through POST /api/agents and must both 400 AND leave no file outside the isolated agents root, tool widening is rejected on BOTH create and update, persona injection is verified escaped in the actual recorded prompt transcript, PUT is proven to be a true partial edit that is idempotent and cannot widen tools or rename onto a builtin, and the full D10 workspace-escape suite is re-run unchanged (agents must never weaken it)."""
+"""How this could pass while broken: a slug/name check that only rejects the LITERAL string '../' while a URL-encoded or absolute variant still writes outside agents/, a tools list that is merged with (not intersected against) the global allow-list, or persona text concatenated raw into the prompt so a planted `</worker_instructions><system>` breaks out of its tag, OR (Q1-R3) PUT /api/agents/{slug} never being exercised at all so a path-shaped slug in the URL, a widened tools list on edit, a rename onto the builtin slug, or a non-idempotent double-PUT would all sail through unnoticed; now each traversal/absolute/NUL slug is driven through POST /api/agents and must both 400 AND leave no file outside the isolated agents root, tool widening is rejected on BOTH create and update, persona injection is verified escaped in the actual recorded prompt transcript, PUT is proven to be a true partial edit that is idempotent and cannot widen tools or rename onto a builtin, and the full D10 workspace-escape suite is re-run unchanged (agents must never weaken it), OR (Grok round-5 audit) a team containing itself/a cycle/a missing member/a disabled member being silently accepted at POST or PUT instead of 400-rejected with a named error_tag and zero file writes."""
 
 from __future__ import annotations
 
@@ -26,6 +26,24 @@ from _harness import (
     tmp_agents_root,
     write_json,
 )
+
+
+def _agent_file_snapshot(root):
+    return {str(p): p.stat().st_mtime_ns for p in root.rglob("*.md")}
+
+
+def _named_error_tag(resp) -> str:
+    try:
+        body = resp.json()
+    except Exception:
+        return ""
+    if not isinstance(body, dict):
+        return ""
+    for key in ("error_tag", "error", "detail", "message"):
+        val = body.get(key)
+        if isinstance(val, str) and val.strip():
+            return val
+    return ""
 
 MALICIOUS_SLUGS = {
     "traversal": "../../evil",
@@ -236,6 +254,225 @@ def test_d17_agent_update_put_invariants():
 
         results["idempotent_bytes_equal"] = bytes_after_2 == bytes_after_1
         write_json("d17-put-invariants.json", results)
+    finally:
+        srv.stop()
+
+
+def test_d17_team_validity_rejected_at_create_and_update():
+    """Grok round-5 audit: team containing self/a cycle/a missing member/a
+    disabled member must 400 with a named error_tag at BOTH POST and PUT,
+    and must never write a file — mirrors what the duplicate() path already
+    proves for slug collisions.
+    """
+    agents_root = tmp_agents_root()
+    srv = spawn_serve(extra_env={"OMNIAGENTOS_AGENTS_ROOT": str(agents_root)})
+    results: dict[str, dict] = {}
+    try:
+        skill_slug, _sha = first_real_skill()
+
+        # A member that is itself disabled (invalid skill reference — the
+        # Round 6 skill-integrity guard: "referenced skills must exist else
+        # load error recorded, agent disabled"). Two implementation shapes
+        # are both PLAN-consistent: (a) the agent is created 2xx and shows
+        # up disabled in the listing, or (b) the create is itself eagerly
+        # rejected 400 (never even reaches "existing but disabled"). Under
+        # (b) there is no disabled agent slug to reference in a team at
+        # all, so the "disabled-member" sub-case of the loop below is
+        # skipped for THIS run — loudly recorded, never silently vacuous —
+        # and the other three cases (missing-member/self/cycle) still run
+        # and are still the real assertions this test exists for.
+        disabled_member_resp = post_json(
+            srv.base_url,
+            "/api/agents",
+            {
+                "name": "Disabled Member D17T",
+                "title": "x",
+                "persona": "x " * 6,
+                "skills": ["no-such-skill-slug-d17t"],
+            },
+        )
+        disabled_member_slug = None
+        if disabled_member_resp.status_code in (200, 201):
+            disabled_member = disabled_member_resp.json()
+            slug = disabled_member.get("slug") or disabled_member.get("id")
+            listing = get_json(srv.base_url, "/api/agents").json()
+            items = listing.get("items") or listing.get("agents") or listing
+            if isinstance(items, dict):
+                items = items.get("items") or []
+            entry = next(
+                (i for i in items if str(i.get("slug") or i.get("id")) == str(slug)),
+                None,
+            )
+            assert entry is not None, f"disabled-member fixture missing from GET /api/agents: {slug!r}"
+            fixture_disabled = entry.get("enabled") is False or entry.get("disabled") is True
+            assert fixture_disabled, (
+                f"disabled-member fixture (invalid skill ref) was created 2xx but is NOT "
+                f"listed disabled, got {entry!r} — an agent with an unresolvable skill "
+                "reference must never load as healthy"
+            )
+            disabled_member_slug = str(slug)
+        results["disabled-member-fixture-status"] = disabled_member_resp.status_code
+        if disabled_member_slug is None:
+            results["disabled-member-fixture-note"] = (
+                "invalid-skill create was rejected 400 at creation time in this "
+                "implementation (a PLAN-consistent alternative to create-then-disable); "
+                "no disabled agent slug exists to test the disabled-member team case, "
+                "so it is skipped this run — missing-member/self/cycle still run below"
+            )
+
+        simple_cases = {"missing-member": ["no-such-agent-slug-d17t"]}
+        if disabled_member_slug:
+            simple_cases["disabled-member"] = [disabled_member_slug]
+
+        # --- POST: each malformed team must 400, name an error_tag, write nothing.
+        before = _agent_file_snapshot(agents_root)
+        for label, team in simple_cases.items():
+            resp = post_json(
+                srv.base_url,
+                "/api/agents",
+                {
+                    "name": f"Bad Team {label} D17T",
+                    "title": "x",
+                    "persona": "x " * 6,
+                    "skills": [skill_slug],
+                    "team": team,
+                },
+            )
+            results[f"post-{label}"] = resp.status_code
+            assert resp.status_code == 400, (
+                f"POST /api/agents team={team!r} ({label}) must 400, got "
+                f"{resp.status_code}: {resp.text[:300]}"
+            )
+            tag = _named_error_tag(resp)
+            assert tag, f"POST {label} 400 response has no named error_tag/error/detail: {resp.text[:300]}"
+            results[f"post-{label}-tag"] = tag
+
+        # self: the manager's own (not-yet-assigned) slug is deterministic
+        # from its name via the same slugify() the implementer uses; probe
+        # with the name-derived slug the API would assign.
+        from _harness import slugify
+
+        self_name = "Self Team D17T"
+        self_resp = post_json(
+            srv.base_url,
+            "/api/agents",
+            {
+                "name": self_name,
+                "title": "x",
+                "persona": "x " * 6,
+                "skills": [skill_slug],
+                "team": [slugify(self_name)],
+            },
+        )
+        results["post-self"] = self_resp.status_code
+        assert self_resp.status_code == 400, (
+            f"POST /api/agents with a team containing its own (about-to-be-assigned) "
+            f"slug must 400, got {self_resp.status_code}: {self_resp.text[:300]}"
+        )
+        assert _named_error_tag(self_resp), (
+            f"self-reference 400 response has no named error_tag/error/detail: {self_resp.text[:300]}"
+        )
+
+        # cycle: manager_a.team=[manager_b], manager_b.team=[manager_a] —
+        # build manager_a with an EMPTY team first (a manager-shaped agent
+        # that manages no one yet), then create manager_b pointing at
+        # manager_a. manager_b -> manager_a is exactly 2 agents deep (within
+        # the depth<=2 limit — manager_a has no further members, so this is
+        # NOT the same 3-deep chain a manager_a.team=[a worker] setup would
+        # produce). The cycle is formed AFTERWARDS by the PUT below, which
+        # is the actually-interesting assertion (a cycle formed via update,
+        # not just creation) — this is deliberately depth-safe so a
+        # depth-limit rejection here can never be mistaken for the cycle
+        # rejection this test is actually probing.
+        manager_a = create_agent(
+            srv.base_url,
+            name="Cycle Manager A D17T",
+            title="x",
+            persona="x " * 6,
+            skills=[],
+            team=[],
+        )
+        cycle_resp = post_json(
+            srv.base_url,
+            "/api/agents",
+            {
+                "name": "Cycle Manager B D17T",
+                "title": "x",
+                "persona": "x " * 6,
+                "skills": [],
+                "team": [manager_a["slug"]],
+            },
+        )
+        results["post-b-manages-a"] = cycle_resp.status_code
+        assert cycle_resp.status_code in (200, 201), (
+            f"a plain (non-cyclic, depth-2) B-manages-A team must still succeed, got "
+            f"{cycle_resp.status_code}: {cycle_resp.text[:300]}"
+        )
+        manager_b = cycle_resp.json()
+        manager_b_slug = str(manager_b.get("slug") or manager_b.get("id"))
+
+        outside_hits = [
+            str(p)
+            for p in agents_root.parent.rglob("*")
+            if p.is_file() and "agents" not in p.relative_to(agents_root.parent).parts[:1]
+        ]
+        assert not outside_hits, f"malformed team POST wrote outside the agents root: {outside_hits}"
+        after = _agent_file_snapshot(agents_root)
+        new_files = set(after) - set(before) - {
+            str(agents_root / f"{manager_a['slug']}.md"),
+            str(agents_root / f"{manager_b_slug}.md"),
+        }
+        # Only the two legitimately-created managers may have appeared; the
+        # rejected 400 attempts (self/missing-member/disabled-member) must
+        # not have written anything.
+        assert not new_files, f"a rejected POST wrote a file it should not have: {new_files}"
+
+        # --- PUT: attempt to complete the cycle (A's team -> [B]) -> 400,
+        # named error_tag, and A's on-disk team must be UNCHANGED.
+        manager_a_file = find_agent_file(agents_root, manager_a["slug"])
+        fm_before_cycle = parse_agent_file(manager_a_file)
+        put_cycle = httpx.put(
+            srv.base_url + f"/api/agents/{manager_a['slug']}",
+            json={"team": [manager_b_slug]},
+            timeout=15.0,
+        )
+        results["put-cycle"] = put_cycle.status_code
+        assert put_cycle.status_code == 400, (
+            f"PUT completing a manager cycle (A.team=[B] where B.team=[A]) must 400, "
+            f"got {put_cycle.status_code}: {put_cycle.text[:300]}"
+        )
+        assert _named_error_tag(put_cycle), (
+            f"cycle-forming PUT 400 response has no named error_tag/error/detail: "
+            f"{put_cycle.text[:300]}"
+        )
+        fm_after_cycle = parse_agent_file(manager_a_file)
+        assert fm_after_cycle.get("team") == fm_before_cycle.get("team"), (
+            "rejected PUT still mutated the on-disk team field: "
+            f"{fm_after_cycle.get('team')!r} != {fm_before_cycle.get('team')!r}"
+        )
+
+        # PUT with a missing-member team on an existing (valid) agent -> 400,
+        # no on-disk mutation.
+        put_missing = httpx.put(
+            srv.base_url + f"/api/agents/{manager_a['slug']}",
+            json={"team": ["no-such-agent-slug-d17t-put"]},
+            timeout=15.0,
+        )
+        results["put-missing-member"] = put_missing.status_code
+        assert put_missing.status_code == 400, (
+            f"PUT team=[missing member] must 400, got {put_missing.status_code}: "
+            f"{put_missing.text[:300]}"
+        )
+        assert _named_error_tag(put_missing), (
+            f"missing-member PUT 400 response has no named error_tag/error/detail: "
+            f"{put_missing.text[:300]}"
+        )
+        fm_after_missing = parse_agent_file(manager_a_file)
+        assert fm_after_missing.get("team") == fm_before_cycle.get("team"), (
+            "rejected PUT (missing member) still mutated the on-disk team field"
+        )
+
+        write_json("d17-team-validity.json", results)
     finally:
         srv.stop()
 
