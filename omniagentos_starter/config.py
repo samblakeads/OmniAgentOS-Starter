@@ -209,6 +209,24 @@ def skills_dir(env: dict | None = None) -> Path:
     return found or (PACKAGE_DIR / "skills")
 
 
+def agents_dir(env: dict | None = None) -> Path:
+    """Directory scanned for agent files. Same shape and order as skills_dir().
+
+    The roster is a drop-in directory exactly like the skill library: add
+    `agents/<slug>.md` and it appears, delete it and it is gone. The checkout
+    wins over the packaged snapshot so the file you edit is the agent that loads.
+    """
+    override = _env(env, "OMNIAGENTOS_AGENTS_ROOT") or _env(env, "OMNIAGENTOS_AGENTS_DIR")
+    if override:
+        return Path(override).expanduser().resolve()
+    found = _first_existing(Path.cwd() / "agents", REPO_ROOT / "agents", PACKAGE_DIR / "agents")
+    return found or (REPO_ROOT / "agents")
+
+
+def builtin_agents_dir() -> Path:
+    return PACKAGE_DIR / "builtin_agents"
+
+
 def static_dir() -> Path:
     return PACKAGE_DIR / "static"
 

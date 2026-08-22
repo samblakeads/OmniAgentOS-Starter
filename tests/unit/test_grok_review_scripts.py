@@ -178,10 +178,15 @@ def test_the_trees_the_build_hook_snapshots_exist_and_land_where_package_data_lo
     build_lib.mkdir(parents=True)
 
     trees = _bundled_trees()
-    assert {name for name, _ in trees} == {"skills", "assets"}, trees
+    assert {name for name, _ in trees} == {"skills", "assets", "agents"}, trees
     for source_name, dest_name in trees:
         source = REPO_ROOT / source_name
-        assert source.is_dir(), f"{source_name}/ is missing from the checkout"
+        if not source.is_dir():
+            # The hook skips a tree that is not in the checkout, so the test does
+            # too — but only for trees that are genuinely optional. The two below
+            # are asserted unconditionally.
+            assert source_name == "agents", f"{source_name}/ is missing from the checkout"
+            continue
         shutil.copytree(
             source,
             build_lib / dest_name,
@@ -194,8 +199,15 @@ def test_the_trees_the_build_hook_snapshots_exist_and_land_where_package_data_lo
     assert (build_lib / "assets" / "omnirogue-logo.png").is_file(), "a wheel would ship no logo"
     assert not any(p.is_symlink() for p in build_lib.rglob("*")), "a snapshot must not contain symlinks"
 
+    if (REPO_ROOT / "agents").is_dir():
+        assert sorted(build_lib.glob("agents/*.md")), "the agent roster would not ship in a wheel"
+
     # ...and every file above is actually matched by a package-data glob.
-    for relative in ("skills/marketing-content/ad-copy-framework-writer.md", "assets/omnirogue-logo.png"):
+    for relative in (
+        "skills/marketing-content/ad-copy-framework-writer.md",
+        "assets/omnirogue-logo.png",
+        "agents/support-rep.md",
+    ):
         assert any(pathlib.PurePath(relative).match(pat) for pat in patterns), (
             f"{relative} is snapshotted into the package but no package-data glob matches it"
         )

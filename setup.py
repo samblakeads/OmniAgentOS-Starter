@@ -32,7 +32,7 @@ from setuptools.command.build_py import build_py as _build_py
 HERE = Path(__file__).resolve().parent
 PACKAGE = "omniagentos_starter"
 # (source at the repo root, destination inside the built package)
-BUNDLED_TREES = (("skills", "skills"), ("assets", "assets"))
+BUNDLED_TREES = (("skills", "skills"), ("assets", "assets"), ("agents", "agents"))
 
 
 class build_py(_build_py):

@@ -59,8 +59,10 @@ omniagentos_starter = [
   "static/*",
   "data/*.json",
   "builtin_skills/*.md",
+  "builtin_agents/*.md",
   "skills/*.md",
   "skills/*/*.md",
+  "agents/*.md",
   "assets/*",
 ]
 
