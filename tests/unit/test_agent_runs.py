@@ -135,6 +135,7 @@ async def test_an_unknown_agent_is_refused_not_quietly_ignored(settings, tmp_pat
 async def test_a_disabled_agent_is_refused(settings, tmp_path):
     orch = _orch(settings, Script(), tmp_path, [])
     root = tmp_path / "agents"
+    root.mkdir(parents=True, exist_ok=True)
     (root / "broken.md").write_text(
         "---\nname: Broken\nskills: [no-such-pack]\n---\nbody\n", encoding="utf-8"
     )

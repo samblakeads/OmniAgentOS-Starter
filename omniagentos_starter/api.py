@@ -21,6 +21,7 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Res
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
+from .agents import AgentError, AgentStore, safe_agent_slug
 from .config import (
     MAX_ARTIFACT_CHARS,
     MAX_EXTRA_DOD,
@@ -112,6 +113,7 @@ def criterion_text(item) -> str:
 class RunRequest(BaseModel):
     goal: str = Field(min_length=1, max_length=MAX_GOAL_CHARS)
     max_rounds: int | None = None
+    agent_id: str | None = Field(default=None, max_length=64)
     extra_dod: list[str | dict] = Field(default_factory=list, max_length=MAX_EXTRA_DOD)
 
     @field_validator("extra_dod")
@@ -197,6 +199,10 @@ def create_app(settings: Settings | None = None, orchestrator: Orchestrator | No
     settings = settings or Settings.from_env()
     orch = orchestrator or Orchestrator(settings, transport=transport)
     orch.load_library(skills_dir())
+    # After the library: an agent's `skills:` list is validated against it, and a
+    # roster read first would disable every agent for naming packs not yet read.
+    orch.load_roster(settings.agents_dir)
+    store = AgentStore(settings.agents_dir)
     probe = ProbeCache(settings, transport=transport)
 
     app = FastAPI(title="OmniAgentOS Starter", version=VERSION, docs_url=None, redoc_url=None)
@@ -306,6 +312,7 @@ def create_app(settings: Settings | None = None, orchestrator: Orchestrator | No
             "provider_host": settings.provider.host,
             "brand": settings.brand.as_dict(),
             "skills": lib.count,
+            "agents": orch.roster.count + (1 if orch.roster.builtin else 0),
             "replay": replay_metadata(),
             "max_rounds": settings.max_rounds,
         }
@@ -331,11 +338,84 @@ def create_app(settings: Settings | None = None, orchestrator: Orchestrator | No
         lessons = orch.memory.all_lessons()
         return JSONResponse(redact({"lessons": lessons, "items": lessons}))
 
+    # ---------------------------------------------------------------- agents
+    def _reload_roster():
+        return orch.load_roster(settings.agents_dir)
+
+    def _agent_error(exc: AgentError) -> JSONResponse:
+        return JSONResponse(redact(exc.as_dict()), status_code=exc.status)
+
+    @api.get("/agents")
+    async def list_agents() -> JSONResponse:
+        return JSONResponse(redact(_reload_roster().as_dict()))
+
+    @api.get("/agents/{slug}")
+    async def get_agent(slug: str) -> JSONResponse:
+        agent = _reload_roster().by_id(slug)
+        if agent is None:
+            return JSONResponse(
+                {"error_tag": "AGENT_NOT_FOUND", "message": f"no agent {safe_agent_slug(slug)!r}"},
+                status_code=404,
+            )
+        return JSONResponse(redact(agent.as_dict()))
+
+    @api.post("/agents")
+    async def create_agent(request: Request) -> JSONResponse:
+        try:
+            payload = await request.json()
+        except Exception:
+            return JSONResponse(
+                {"error_tag": "BAD_REQUEST", "message": "the body must be a JSON object"}, status_code=400
+            )
+        try:
+            agent = store.create(payload, library=orch.library)
+        except AgentError as exc:
+            return _agent_error(exc)
+        _reload_roster()
+        return JSONResponse(redact(agent.as_dict()), status_code=201)
+
+    @api.put("/agents/{slug}")
+    async def update_agent(slug: str, request: Request) -> JSONResponse:
+        try:
+            payload = await request.json()
+        except Exception:
+            return JSONResponse(
+                {"error_tag": "BAD_REQUEST", "message": "the body must be a JSON object"}, status_code=400
+            )
+        try:
+            agent = store.update(slug, payload, library=orch.library)
+        except AgentError as exc:
+            return _agent_error(exc)
+        _reload_roster()
+        return JSONResponse(redact(agent.as_dict()))
+
+    @api.post("/agents/{slug}/duplicate")
+    async def duplicate_agent(slug: str, request: Request) -> JSONResponse:
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        try:
+            agent = store.duplicate(slug, _reload_roster(), payload if isinstance(payload, dict) else {})
+        except AgentError as exc:
+            return _agent_error(exc)
+        _reload_roster()
+        return JSONResponse(redact(agent.as_dict()), status_code=201)
+
+    @api.delete("/agents/{slug}")
+    async def delete_agent(slug: str) -> JSONResponse:
+        try:
+            removed = store.delete(slug, _reload_roster())
+        except AgentError as exc:
+            return _agent_error(exc)
+        _reload_roster()
+        return JSONResponse({"deleted": removed})
+
     # ------------------------------------------------------------------ runs
     @api.post("/runs")
     async def create_run(req: RunRequest) -> JSONResponse:
         try:
-            run = orch.create(req.goal, req.max_rounds, req.criteria())
+            run = orch.create(req.goal, req.max_rounds, req.criteria(), agent_id=req.agent_id)
         except RunLimit as exc:
             return JSONResponse(redact({"error_tag": "RUN_LIMIT", "message": str(exc)}), status_code=429)
         except ValueError as exc:
@@ -344,7 +424,16 @@ def create_app(settings: Settings | None = None, orchestrator: Orchestrator | No
         # The goal is echoed back, and a goal is whatever the operator pasted —
         # including, on a bad day, the curl command with the key still in it.
         return JSONResponse(
-            redact({"run_id": run.id, "status": run.status, "goal": run.goal}), status_code=201
+            redact(
+                {
+                    "run_id": run.id,
+                    "status": run.status,
+                    "goal": run.goal,
+                    "agent_id": run.agent_id,
+                    "agent": {"id": run.agent.slug, "name": run.agent.name} if run.agent else None,
+                }
+            ),
+            status_code=201,
         )
 
     @api.post("/demo")

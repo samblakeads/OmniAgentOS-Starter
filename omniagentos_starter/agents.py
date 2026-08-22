@@ -399,10 +399,14 @@ class AgentStore:
     missed.
     """
 
-    def __init__(self, root: Path | str | None = None, create: bool = True):
+    def __init__(self, root: Path | str | None = None, create: bool = False):
         self.root = Path(root or agents_dir()).expanduser().resolve()
         if create:
             self.root.mkdir(parents=True, exist_ok=True)
+
+    def _ready(self) -> None:
+        """Make the roster directory only when something is actually written."""
+        self.root.mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------------ paths
     def path_for(self, slug: str) -> Path:
@@ -457,6 +461,7 @@ class AgentStore:
 
     def create(self, payload: dict, library=None) -> Agent:
         agent = self.build(payload)
+        self._ready()
         self._require_known_skills(agent, library)
         path = self.path_for(agent.slug)
         if path.exists():
@@ -466,6 +471,7 @@ class AgentStore:
         return agent
 
     def update(self, slug: str, payload: dict, library=None) -> Agent:
+        self._ready()
         path = self.path_for(slug)
         if not path.is_file():
             raise AgentError("AGENT_NOT_FOUND", f"no agent {safe_agent_slug(slug)!r}", status=404)
@@ -476,6 +482,7 @@ class AgentStore:
         return agent
 
     def duplicate(self, slug: str, roster: AgentRoster, payload: dict | None = None) -> Agent:
+        self._ready()
         source = roster.by_id(slug)
         if source is None:
             raise AgentError("AGENT_NOT_FOUND", f"no agent {safe_agent_slug(slug)!r}", status=404)

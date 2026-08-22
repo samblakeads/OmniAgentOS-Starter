@@ -287,6 +287,7 @@ class Settings:
     port: int = 8486
     data_dir: Path = field(default_factory=lambda: Path.cwd() / "var")
     workspace_dir: Path = field(default_factory=lambda: Path.cwd() / "workspace")
+    agents_dir: Path = field(default_factory=agents_dir)
     provider: ProviderConfig = field(default_factory=resolve_provider)
     brand: Brand = field(default_factory=resolve_brand)
     token: str = ""
@@ -316,6 +317,7 @@ class Settings:
             port=port,
             data_dir=data,
             workspace_dir=(Path.cwd() / "workspace").resolve(),
+            agents_dir=agents_dir(env),
             provider=resolve_provider(env),
             brand=resolve_brand(env),
             token=token,
