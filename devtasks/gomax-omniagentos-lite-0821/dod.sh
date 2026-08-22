@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# RIDERS: LIVE-BOUNDARY=D2:api.x.ai,D4:api.x.ai,D5:api.x.ai,D9:api.x.ai OPERATOR-VANTAGE=D3 CANNED-FALLBACK=D7 FEATURE-E2E=D4,D5,D6,D9,D13 CONTENT=D9 END-STATE=D8 INVARIANTS=D10 SWEEP=evidence/foreseeable-sweep.md
-# OmniAgentOS Starter DoD oracle runner (U0). Exit 0 only if D1-D14 all PASS
+# RIDERS: LIVE-BOUNDARY=D2:api.x.ai,D4:api.x.ai,D5:api.x.ai,D9:api.x.ai,D16:api.x.ai OPERATOR-VANTAGE=D3,D15 CANNED-FALLBACK=D7 FEATURE-E2E=D4,D5,D6,D9,D13,D16 CONTENT=D9 END-STATE=D8 INVARIANTS=D10,D17 SWEEP=evidence/foreseeable-sweep.md
+# OmniAgentOS Starter DoD oracle runner (U0). Exit 0 only if D1-D17 all PASS
 # and evidence/audit-verdict.txt contains "Verified Complete" plus an auditor lineage.
 #
 # SCHEDULING NOTE (non-weakening): checks D1-D14 are grouped and run with
@@ -24,6 +24,11 @@
 # not match this run's nonce reads as FAIL, never a silent stale PASS. A
 # failure to create or tear down that run directory is a runner-level
 # failure (`FAIL RUNNER`, exit 1), distinct from any Dn.
+#
+# ROUND 6 — AGENTS NOTE: D15 (AGENT-CREATE, browser), D16 (AGENT-RUN, live
+# api.x.ai), D17 (AGENT-INVARIANTS) added per PLAN.md's "Round 6 — AGENTS"
+# section. D1-D14 are UNCHANGED (no assertion, threshold, grouping-eligibility,
+# or self-check for those 14 weakened by this addition — only new Dn added).
 
 set -u
 umask 077
@@ -60,7 +65,7 @@ if [ ! -f "$EVIDENCE/foreseeable-sweep.md" ]; then
 fi
 
 missing=0
-for n in 01 02 03 04 05 06 07 08 09 10 11 12 13 14; do
+for n in 01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17; do
   if ! ls "$TESTS"/test_d${n}_*.py >/dev/null 2>&1; then
     echo "missing tests/dod/test_d${n}_*.py" >&2
     missing=1
@@ -71,7 +76,7 @@ if [ "$missing" -ne 0 ]; then
 fi
 
 # LIVE-BOUNDARY files must not contain transport mocks or an obvious api.x.ai stub.
-live_files="$TESTS/test_d02_live_boundary.py $TESTS/test_d04_loop_until_done.py $TESTS/test_d05_self_learning_memory.py $TESTS/test_d09_demo_goals.py"
+live_files="$TESTS/test_d02_live_boundary.py $TESTS/test_d04_loop_until_done.py $TESTS/test_d05_self_learning_memory.py $TESTS/test_d09_demo_goals.py $TESTS/test_d16_agent_run.py"
 if grep -E -n "MockTransport|monkeypatch|respx" $live_files >/dev/null 2>&1; then
   echo "LIVE-BOUNDARY file contains MockTransport/monkeypatch/respx" >&2
   fail_riders
@@ -173,14 +178,16 @@ run_group() {
 
 # Grouping (independent live boundaries -> parallel; heavy solo checks get
 # their own group so they don't block/be blocked by unrelated fast checks):
-#   A: D2 D4 D5   (xAI live: single run, extra_dod loop, memory 2-run)
-#   B: D6         (skills ablation, several live runs, ~340s alone)
-#   C: D9 D12     (DEMO goal drills + stage-clock, share the drill shape)
-#   D: D3 D7 D13  (playwright/browser + fallback + no-key)
-#   E: D1 D8 D10 D11 D14 (fast: health/pid/nonce, collect-only, invariants,
-#      receipt schema, hygiene — no long-running live run in this set)
+#   A: D2 D4 D5 D16 (xAI live: single run, extra_dod loop, memory 2-run,
+#      agent-run persona/skill/memory)
+#   B: D6           (skills ablation, several live runs, ~340s alone)
+#   C: D9 D12       (DEMO goal drills + stage-clock incl. beat 0, share drill shape)
+#   D: D3 D7 D13 D15 (playwright/browser: vantage, fallback, no-key, agent-create)
+#   E: D1 D8 D10 D11 D14 D17 (fast: health/pid/nonce, collect-only, invariants,
+#      receipt schema, hygiene, agent-invariants — mostly no long-running
+#      live run in this set)
 set +e
-DOD_GROUPS="2 4 5|6|9 12|3 7 13|1 8 10 11 14"
+DOD_GROUPS="2 4 5 16|6|9 12|3 7 13 15|1 8 10 11 14 17"
 MAX_CONC=3
 
 START_TS="$(date +%s)"
@@ -221,11 +228,11 @@ wait "$WATCHDOG_PID" 2>/dev/null
 ELAPSED="$(( $(date +%s) - START_TS ))"
 echo "dod.sh: parallel checks finished in ${ELAPSED}s" >&2
 
-# Print exactly one PASS Dn / FAIL Dn line per D1-D14, IN ORDER, after all
+# Print exactly one PASS Dn / FAIL Dn line per D1-D17, IN ORDER, after all
 # groups finish. A missing status file (crash/kill) reads as FAIL, never
 # silently omitted.
 all_pass=1
-for n in 1 2 3 4 5 6 7 8 9 10 11 12 13 14; do
+for n in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17; do
   status_file="$RUNDIR/d${n}.status"
   verdict="FAIL"
   if [ -f "$status_file" ]; then

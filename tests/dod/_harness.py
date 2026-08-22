@@ -23,6 +23,7 @@ from urllib.parse import urlparse
 
 import httpx
 import pytest
+import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 _PW_BROWSERS = REPO_ROOT / ".venv" / "ms-playwright"
@@ -482,12 +483,15 @@ def start_run(
     goal: str,
     extra_dod: list[dict[str, Any]] | None = None,
     max_rounds: int | None = None,
+    agent_id: str | None = None,
 ) -> str:
     body: dict[str, Any] = {"goal": goal}
     if extra_dod is not None:
         body["extra_dod"] = extra_dod
     if max_rounds is not None:
         body["max_rounds"] = max_rounds
+    if agent_id is not None:
+        body["agent_id"] = agent_id
     resp = post_json(base_url, "/api/runs", body)
     if resp.status_code == 429:
         raise AssertionError("POST /api/runs returned 429 MAX_CONCURRENT_RUNS busy")
@@ -583,7 +587,8 @@ def validate_receipt(receipt: dict[str, Any] | str | Path) -> dict[str, Any]:
     return receipt
 
 
-_DOD_SUFFIX_RE = re.compile(r"\s*\|\|\|\s*dod:\s*(.+?)\s*$", re.I)
+_DOD_SUFFIX_RE = re.compile(r"\s*\|\|\|\s*dod:\s*(.+?)\s*(?=\s*\|\|\|\s*agent:|$)", re.I)
+_AGENT_SUFFIX_RE = re.compile(r"\s*\|\|\|\s*agent:\s*(\S+)\s*$", re.I)
 
 
 def _split_dod_suffix(line: str) -> tuple[str, list[str]]:
@@ -593,13 +598,33 @@ def _split_dod_suffix(line: str) -> tuple[str, list[str]]:
     ```dod-goals line may end with literal ` ||| dod: <criterion text>`.
     Everything before the separator is the goal; everything after is one
     critic/verifier-only rubric criterion posted as `extra_dod`. A line with
-    no separator carries no extra_dod (empty list).
+    no separator carries no extra_dod (empty list). FIXED ORDER when both
+    suffixes are present on one line: ` ||| dod: <criterion> ||| agent:
+    <slug>` — dod always precedes agent. The trailing agent segment is
+    stripped first so the dod regex only has to match up to end-of-string.
     """
-    m = _DOD_SUFFIX_RE.search(line)
+    goal, _agent = _split_agent_suffix(line)
+    m = _DOD_SUFFIX_RE.search(goal)
     if not m:
-        return line.strip(), []
-    goal = line[: m.start()].strip()
-    return goal, [m.group(1).strip()]
+        return goal.strip(), []
+    stripped_goal = goal[: m.start()].strip()
+    return stripped_goal, [m.group(1).strip()]
+
+
+def _split_agent_suffix(line: str) -> tuple[str, str | None]:
+    """Split a trailing ` ||| agent: <slug>` off a dod-goals fence line.
+
+    BINDING separator (Round 6 pin, implementers/U2 must match exactly): a
+    fenced ```dod-goals line may end with literal ` ||| agent: <slug>` —
+    the DEMO beat's goal is assigned to that agent (POST /api/runs
+    {..., agent_id: <slug>}) instead of the router. May appear together
+    with ` ||| dod: <criterion>` on the same line, in either order. A line
+    with no `||| agent:` segment carries no agent assignment (None).
+    """
+    m = _AGENT_SUFFIX_RE.search(line)
+    if not m:
+        return line, None
+    return line[: m.start()], m.group(1).strip()
 
 
 def parse_demo_goals(demo_md: Path | None = None) -> list[str]:
@@ -627,6 +652,18 @@ def parse_demo_goals_with_dod(
     Only the fenced ```dod-goals form carries the ` ||| dod: <criterion>`
     suffix; the GOAL:/Goal N: forms never carry extra_dod (empty list).
     """
+    return [(g, dod) for g, dod, _agent in parse_demo_goals_full(demo_md)]
+
+
+def parse_demo_goals_full(
+    demo_md: Path | None = None,
+) -> list[tuple[str, list[str], str | None]]:
+    """(goal, [extra_dod_criterion, ...], agent_slug_or_None) triples.
+
+    Only the fenced ```dod-goals form carries either the ` ||| dod:
+    <criterion>` or ` ||| agent: <slug>` suffix (Round 6 pin); the
+    GOAL:/Goal N: forms never carry either (empty dod list, agent=None).
+    """
     path = demo_md or (REPO_ROOT / "DEMO.md")
     if not path.is_file():
         raise AssertionError(f"DEMO.md missing at {path}")
@@ -639,15 +676,16 @@ def parse_demo_goals_with_dod(
             raise AssertionError(
                 f"dod-goals fence must contain exactly 3 goals, got {len(lines)}"
             )
-        pairs: list[tuple[str, list[str]]] = []
+        triples: list[tuple[str, list[str], str | None]] = []
         for ln in lines:
-            goal, dod = _split_dod_suffix(ln)
-            pairs.append((_unquote(goal), dod))
-        return pairs
+            goal_and_dod, agent = _split_agent_suffix(ln)
+            goal, dod = _split_dod_suffix(goal_and_dod)
+            triples.append((_unquote(goal), dod, agent))
+        return triples
 
     labeled = re.findall(r"^GOAL(?:\s*[1-3])?:\s*(.+?)\s*$", text, re.M | re.I)
     if len(labeled) >= 3:
-        return [(_unquote(g), []) for g in labeled[:3]]
+        return [(_unquote(g), [], None) for g in labeled[:3]]
 
     numbered: list[str] = []
     for n in (1, 2, 3):
@@ -660,7 +698,7 @@ def parse_demo_goals_with_dod(
             break
         numbered.append(_unquote(m.group(1)))
     if len(numbered) == 3:
-        return [(g, []) for g in numbered]
+        return [(g, [], None) for g in numbered]
 
     raise AssertionError(
         "DEMO.md does not contain 3 parseable literal goals. "
@@ -844,3 +882,178 @@ def execute_worker_tool(root: str | Path, name: str, arguments: dict[str, Any]) 
             f"execute_worker_tool must return dict, got {type(result)} {result!r}"
         )
     return result
+
+
+# ------------------------------------------------------------- Round 6: AGENTS
+# BINDING (PLAN.md "Round 6 — AGENTS"): AgentStore is rooted at
+# OMNIAGENTOS_AGENTS_ROOT if set, else <repo>/agents. Loader = directory scan,
+# same shape as skills/: `agents/<slug>.md` = YAML front-matter + body,
+# `_builtin/general-worker.md` always present. Global tool allow-list is
+# [read_file, write_file, list_files]; an agent's `tools` may only narrow it.
+
+AGENT_GLOBAL_TOOLS = ("read_file", "write_file", "list_files")
+
+
+def agents_root() -> Path:
+    env = os.environ.get("OMNIAGENTOS_AGENTS_ROOT")
+    if env:
+        return Path(env)
+    p = REPO_ROOT / "agents"
+    if p.is_dir():
+        return p
+    raise AssertionError("agents/ directory missing at repo root")
+
+
+def tmp_agents_root() -> Path:
+    """Copy the shipped agents/ roster into a fresh tmp dir.
+
+    Tests must NEVER write through the real <repo>/agents tree — every test
+    that creates/edits/deletes an agent points OMNIAGENTOS_AGENTS_ROOT at the
+    directory this returns (via spawn_serve(extra_env=...)), so the shipped
+    prebuilt roster is never mutated. If agents/ does not exist yet (the
+    red-first state before implementers build it), a minimal `_builtin/
+    general-worker.md` fixture is synthesized so the harness itself doesn't
+    crash before the real assertions (which still fail red against the
+    missing API/engine).
+    """
+    src = REPO_ROOT / "agents"
+    tmp = Path(tempfile.mkdtemp(prefix="omniagentos-agents-"))
+    dest = tmp / "agents"
+    if src.is_dir():
+        shutil.copytree(src, dest)
+    else:
+        builtin = dest / "_builtin"
+        builtin.mkdir(parents=True, exist_ok=True)
+        (builtin / "general-worker.md").write_text(
+            "---\n"
+            "name: General Worker\n"
+            "title: General Worker\n"
+            "persona: A capable general-purpose worker with no specialised pack.\n"
+            "skills: []\n"
+            "tools: [read_file, write_file, list_files]\n"
+            "memory_scope: general-worker\n"
+            "visibility: public\n"
+            "version: 1\n"
+            "---\n"
+            "You are a capable general-purpose worker.\n",
+            encoding="utf-8",
+        )
+    return dest
+
+
+def slugify(name: str) -> str:
+    """BINDING slug derivation the oracle expects from a display name.
+
+    Lowercase, non-alnum runs collapsed to a single hyphen, no leading/
+    trailing hyphen. Implementers may use any equivalent derivation as long
+    as it is deterministic and collision-checked (409) — tests treat the
+    API's returned slug as authoritative and only use this as a fallback
+    guess when a response omits it.
+    """
+    s = re.sub(r"[^a-z0-9]+", "-", name.strip().lower()).strip("-")
+    return s or "agent"
+
+
+def parse_agent_file(path: Path) -> dict[str, Any]:
+    """Parse an agents/<slug>.md front-matter + body. Oracle definition, BINDING on the loader."""
+    text = path.read_text(encoding="utf-8")
+    if not text.startswith("---"):
+        raise AssertionError(f"agent file {path} missing YAML front-matter")
+    parts = text.split("---", 2)
+    if len(parts) < 3:
+        raise AssertionError(f"agent file {path} malformed front-matter")
+    fm = yaml.safe_load(parts[1]) or {}
+    if not isinstance(fm, dict):
+        raise AssertionError(f"agent file {path} front-matter is not a mapping")
+    body = parts[2].strip()
+    fm["_body"] = body
+    fm["_path"] = path
+    fm["_sha256"] = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    return fm
+
+
+def find_agent_file(root: Path, slug: str) -> Path:
+    for p in root.rglob("*.md"):
+        if p.stem == slug:
+            return p
+    raise AssertionError(f"no agents/**/{slug}.md under {root}")
+
+
+def create_agent(
+    base_url: str,
+    name: str,
+    title: str,
+    persona: str,
+    skills: list[str],
+    tools: list[str] | None = None,
+) -> dict[str, Any]:
+    """POST /api/agents. Returns the parsed JSON body (must include a slug)."""
+    body: dict[str, Any] = {"name": name, "title": title, "persona": persona, "skills": skills}
+    if tools is not None:
+        body["tools"] = tools
+    resp = post_json(base_url, "/api/agents", body)
+    if resp.status_code not in (200, 201):
+        raise AssertionError(f"POST /api/agents -> HTTP {resp.status_code}: {resp.text[:800]}")
+    data = resp.json()
+    if not isinstance(data, dict):
+        raise AssertionError(f"POST /api/agents must return an object, got {data!r}")
+    slug = data.get("slug") or data.get("id")
+    if not slug:
+        raise AssertionError(f"POST /api/agents response missing slug/id: {data!r}")
+    data["slug"] = str(slug)
+    return data
+
+
+def first_real_skill() -> tuple[str, str]:
+    """Return (skill_slug, sha256) of the first non-builtin shipped skill on disk.
+
+    Used by D16/D17 as a real, injectable skill to assign to a test agent.
+    """
+    root = REPO_ROOT / "skills"
+    if not root.is_dir():
+        raise AssertionError("skills/ directory missing at repo root")
+    files = sorted(
+        p
+        for p in root.rglob("*.md")
+        if p.name.lower() != "readme.md" and p.parent.name != "_builtin"
+    )
+    if not files:
+        raise AssertionError("no non-builtin skill files under skills/")
+    f = files[0]
+    text = f.read_text(encoding="utf-8")
+    return f.stem, hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def second_real_skill(exclude_slug: str) -> tuple[str, str]:
+    """Return (skill_slug, sha256) of a DIFFERENT shipped skill than exclude_slug.
+
+    Used by D16 to prove a pack outside the agent's list never reaches the
+    worker prompt.
+    """
+    root = REPO_ROOT / "skills"
+    files = sorted(
+        p
+        for p in root.rglob("*.md")
+        if p.name.lower() != "readme.md" and p.parent.name != "_builtin"
+    )
+    for f in files:
+        if f.stem != exclude_slug:
+            text = f.read_text(encoding="utf-8")
+            return f.stem, hashlib.sha256(text.encode("utf-8")).hexdigest()
+    raise AssertionError("need >=2 shipped skills to prove skill isolation (D16)")
+
+
+def agent_events_of(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return events_of(events, "agent.assigned")
+
+
+def pick_agent_skill() -> str:
+    """Prefer a refund-handling pack for DEMO beat 0 (PLAN: 'Riley ... with the refund pack')."""
+    root = REPO_ROOT / "skills"
+    if root.is_dir():
+        for p in sorted(root.rglob("*.md")):
+            if p.parent.name == "_builtin" or p.name.lower() == "readme.md":
+                continue
+            if "refund" in p.stem.lower():
+                return p.stem
+    return first_real_skill()[0]

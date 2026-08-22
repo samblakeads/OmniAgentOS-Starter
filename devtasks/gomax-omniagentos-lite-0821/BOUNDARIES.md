@@ -42,10 +42,11 @@ in this working tree.
 
 | boundary | mocked tests | unmocked check | env required | evidence path |
 |---|---|---|---|---|
-| api.x.ai | none in D2/D4/D5/D9 (forbidden: MockTransport, monkeypatch, respx, stub of api.x.ai) | D2 live unmocked run + D4 extra_dod loop + D5 memory + D9 DEMO drills; every counted llm.call has provider_host=api.x.ai | XAI_API_KEY; OMNIAGENTOS_BASE_URL unset or exactly https://api.x.ai/v1 | evidence/d2-live-run.json, evidence/d4-loop.json, evidence/d5-memory.json, evidence/d9-demo-*.json |
-| browser-playwright | none for D3/D13 (real Chromium, real child, real SSE) | D3 operator-vantage primary journey; D7 visible banner text; D13 no-key demo screenshot | XAI_API_KEY for D3; no provider keys for D13; chromium in .venv | evidence/d3-vantage.png, evidence/d3-vantage.json, evidence/d13-nokey.png |
+| api.x.ai | none in D2/D4/D5/D9/D16 (forbidden: MockTransport, monkeypatch, respx, stub of api.x.ai) | D2 live unmocked run + D4 extra_dod loop + D5 memory + D9 DEMO drills + D16 agent-run persona/skill-isolation/memory/regression; every counted llm.call has provider_host=api.x.ai | XAI_API_KEY; OMNIAGENTOS_BASE_URL unset or exactly https://api.x.ai/v1 | evidence/d2-live-run.json, evidence/d4-loop.json, evidence/d5-memory.json, evidence/d9-demo-*.json, evidence/d16-agent-run.json |
+| browser-playwright | none for D3/D13/D15 (real Chromium, real child, real SSE) | D3 operator-vantage primary journey; D7 visible banner text; D13 no-key demo screenshot; D15 agent create/reload/duplicate/edit/delete via the Agents UI | XAI_API_KEY for D3/D15; no provider keys for D13; chromium in .venv | evidence/d3-vantage.png, evidence/d3-vantage.json, evidence/d13-nokey.png, evidence/d15-agent-create.json |
 | GitHub-gh | none in this oracle (GH workflow state is a different unit) | D8 in-repo `pytest --collect-only` on tests/dod collected>0 and live tests do not skip while a key exists | none (XAI_API_KEY only to refuse silent skips) | evidence/d8-collect.json |
 | filesystem-sandbox | none: D10 drives write_file through engine.execute_worker_tool, not a bare WorkspaceGuard unit test | D10 WORKSPACE_ESCAPE for ../x, foo/../../x, /tmp/x, prefix-collision, symlink-out, null-byte; repo-root/package-dir/data-dir refused at construction; no subprocess/os.system/Popen/eval(/exec(; planted key never leaks | planted OMNIAGENTOS_API_KEY=secret_TESTKEY_d10_7f3a9c2e (fail if unset) | evidence/d10-invariants.txt |
+| agents-filesystem | none: D15/D16/D17 always point OMNIAGENTOS_AGENTS_ROOT at a fresh tmp copy of the shipped agents/ roster (tmp_agents_root() in _harness.py) — the real repo agents/ tree is NEVER written by this oracle | D15 create/reload/GET/duplicate/edit/DELETE-403 round-trip via a real browser + real HTTP on the isolated root; D17 traversal/absolute/NUL slug rejection + tool-widening rejection + persona-injection escaping, all against the isolated root | XAI_API_KEY for D15/D17's live sub-test; none for the two non-live D17 sub-tests | evidence/d15-agent-create.json, evidence/d17-slug-rejects.json, evidence/d17-persona-injection.json |
 
 ## How each Dn could pass while broken, and why it can't now
 
@@ -63,6 +64,60 @@ in this working tree.
 - **D12:** Hand-written clock JSON or wall-clock around a mocked burst. Now `t_first_event_ms` and `t_done_ms` are derived from real SSE `ts` per DEMO goal and must be <2000 and <120000; evidence/d12-clock.json.
 - **D13:** Serve refusing no-key start, or `/api/demo` emitting a single canned done. Now all provider keys unset, health `configured:false` + `PROVIDER_NOT_CONFIGURED`, demo SSE has all four role events, screenshot `evidence/d13-nokey.png`.
 - **D14:** LICENSE first line "MIT" on an empty file, runtime paths committed, unbounded skills. Now gitleaks (or equivalent) is clean, `git ls-files` has no `var/` `workspace/` `.env` `*.sqlite3`, LICENSE body matches OSI MIT (trademark paragraph may follow), shipped skills ≤12.
+- **D15 (Round 6):** A UI card materialising from client-side state alone, with no server write, or `/api/agents` backed by an in-memory list that resets on reload. Now the created agent must exist as a real `agents/<slug>.md` file (isolated tmp root) with matching front-matter, survive a full page reload, be listed by a real `GET /api/agents` on the SAME running child, round-trip through duplicate (new slug, copied persona) and PUT edit (persisted to disk), and DELETE on the shipped `general-worker` builtin must 403 while the file survives; a non-builtin DELETE must succeed and remove its file.
+- **D16 (Round 6):** `agent_id` accepted in the request body but silently ignored by the router (business as usual), or an `agent.assigned` event emitted without the persona/skill actually reaching the LLM. Now the worker prompt transcript must contain the persona text verbatim AND the agent's own `skill-sha256:<hex>`, and must NOT contain the `skill-sha256` of a different shipped pack (proves the agent's skill list actually restricts the router, not just suggests to it); the run must be `done` with `verified is True`; `lesson.saved.agent_id` must match; a second run by the same agent must recall that lesson via `memory.recalled.agent_id`; and a sibling run WITHOUT `agent_id` must still behave exactly as before (no `agent.assigned` event, still `done`+`verified`) — the explicit regression guard.
+- **D17 (Round 6):** A slug/name filter that only rejects the literal substring `../` while a URL-encoded or absolute-path variant still escapes, or a `tools` list that is unioned with (rather than intersected against) the global allow-list, or persona text concatenated raw into the system prompt so `</worker_instructions><system>...` breaks out of its tag. Now every malicious slug (`../..`, absolute, NUL byte) is driven through the real `POST /api/agents` and must both 400 AND leave no file outside the isolated agents root; a `tools` superset of `[read_file, write_file, list_files]` must 400 while a subset succeeds; a planted `</worker_instructions><system>` in the persona must appear escaped (or absent, never raw) in the actual recorded prompt transcript; and the full D10 workspace-escape + no-shell + no-key-leak suite is re-run byte-for-byte to prove Round 6 introduced no regression in the sandbox invariants.
+
+## Round 6 — AGENTS pins (binding on implementers, added with D15–D17)
+
+- **AgentStore root:** the server serves agents from `<repo>/agents` **unless**
+  `OMNIAGENTOS_AGENTS_ROOT` is set, in which case that path is authoritative
+  (same override pattern as `OMNIAGENTOS_SKILLS_ROOT`). Every U0 test that
+  creates/edits/deletes an agent sets this env var to a **fresh tmp copy** of
+  the shipped roster (`tmp_agents_root()` in `_harness.py`, mirroring the D6
+  skills-ablation pattern) — the real shipped `agents/` tree is never mutated
+  by this oracle.
+- **Builtin agent:** `agents/_builtin/general-worker.md` must always be
+  present under whatever root is active (shipped copy, or synthesized by the
+  harness when `agents/` doesn't exist yet in the red-first state). `DELETE`
+  on that slug must 403 regardless of root.
+- **`POST /api/agents` response** must include a `slug` (or `id`) field — the
+  oracle treats the API's returned slug as authoritative and never assumes a
+  particular `slugify()` algorithm; `duplicate`/`edit` tests resolve the file
+  by that returned slug, not by guessing.
+- **Global tool allow-list** is exactly `[read_file, write_file, list_files]`
+  (`AGENT_GLOBAL_TOOLS` in `_harness.py`). An agent's `tools` may only be a
+  SUBSET of this list; any tool outside it (e.g. `shell`, `run_command`) in
+  the create/edit body must 400.
+- **`agent.assigned` event**: `{agent_id, skills}` emitted once per run,
+  ONLY when `agent_id` was set on `POST /api/runs`. A run without `agent_id`
+  must never emit it (D16 regression guard).
+- **Worker system prompt** with an agent set must contain the agent's
+  `persona` text verbatim (XML-escaped exactly like goal/artifact text
+  elsewhere — `<`/`>` around a literal `</worker_instructions><system>`
+  payload must never appear raw) and `skill-sha256:<hex>` for each of the
+  agent's own skills only — never a `skill-sha256` for a pack outside the
+  agent's `skills` list.
+- **`lesson.saved`** carries `agent_id` when the run that produced it had one
+  set; **`memory.recalled`** carries `agent_id` and prefers that agent's own
+  lessons (falls back to global recall when the agent has none — matched==0
+  is still explicit, per the existing D5 contract).
+- **DEMO.md `||| agent: <slug>` suffix (new, alongside the existing
+  `||| dod: <criterion>` suffix):** a fenced ` ```dod-goals ` line may end
+  with literal ` ||| agent: <slug>`. Fixed order when both suffixes are
+  present on one line: `||| dod: ... ||| agent: ...` (dod always precedes
+  agent — the agent suffix is stripped first since it anchors to end-of-line).
+  `tests/dod/_harness.py::parse_demo_goals_full()` returns
+  `(goal, [dod_criterion,...], agent_slug_or_None)` triples;
+  `parse_demo_goals()`/`parse_demo_goals_with_dod()` are unchanged in
+  behavior (existing D9/D12 callers using the old two-element contract are
+  unaffected). DEMO beat 0 pins this suffix onto goal 2's line; test_d09 and
+  test_d12 both create an agent matching that slug (name/title/persona
+  mirroring PLAN's "Riley, Meal-Prep Support" beat, skills=[a refund-handling
+  pack if one is shipped, else the first shipped skill]) via `POST
+  /api/agents` and dispatch that goal with the returned `agent_id`, asserting
+  `agent.assigned` fires and (D12) `t_done_ms < 120000` still holds with the
+  agent in the loop.
 
 ## Binding pins the oracle assumes (also listed in the U0 report)
 

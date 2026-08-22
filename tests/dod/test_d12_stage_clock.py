@@ -1,15 +1,18 @@
-"""How this could pass while broken: writing d12-clock.json by hand or using process wall-clock around a mocked burst; now each DEMO goal's t_first_event_ms and t_done_ms are computed from real SSE timestamps and must be <2000ms and <120000ms."""
+"""How this could pass while broken: writing d12-clock.json by hand or using process wall-clock around a mocked burst; now each DEMO goal's t_first_event_ms and t_done_ms are computed from real SSE timestamps and must be <2000ms and <120000ms, INCLUDING beat 0 (goal 2 dispatched to the DEMO.md-pinned agent, which must not blow the same clock budget)."""
 
 from __future__ import annotations
 
 from _harness import (
     collect_sse,
+    create_agent,
     event_type,
     live_xai_base_url_ok,
-    parse_demo_goals,
+    parse_demo_goals_full,
+    pick_agent_skill,
     require_live,
     spawn_serve,
     start_run,
+    tmp_agents_root,
     ts_of,
     write_json,
 )
@@ -18,14 +21,29 @@ from _harness import (
 def test_d12_demo_goals_clock_from_sse():
     require_live()
     assert live_xai_base_url_ok()
-    goals = parse_demo_goals()
-    srv = spawn_serve()
+    triples = parse_demo_goals_full()
+    srv = spawn_serve(extra_env={"OMNIAGENTOS_AGENTS_ROOT": str(tmp_agents_root())})
     clocks = []
     try:
-        for i, goal in enumerate(goals, 1):
+        for i, (goal, _dod, agent_slug) in enumerate(triples, 1):
             import time
 
-            rid = start_run(srv.base_url, goal)
+            agent_id = None
+            if agent_slug:
+                display_name = agent_slug.replace("-", " ").replace("_", " ").title()
+                agent = create_agent(
+                    srv.base_url,
+                    name=display_name,
+                    title="Meal-Prep Support",
+                    persona=(
+                        f"{display_name} is a warm, practical support agent who "
+                        "always cites the exact policy clause behind a decision."
+                    ),
+                    skills=[pick_agent_skill()],
+                )
+                agent_id = agent["slug"]
+
+            rid = start_run(srv.base_url, goal, agent_id=agent_id)
             post_at = time.time()
             events = collect_sse(srv.base_url, rid, timeout_s=150.0)
             assert events, f"goal {i} produced no SSE events"
