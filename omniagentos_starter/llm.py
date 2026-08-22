@@ -213,7 +213,7 @@ class LLMClient:
 
     # ---------------------------------------------------------------- calls
     async def _complete_raw(
-        self, messages: Messages, role: str, model: str | None, json_mode: bool
+        self, messages: Messages, role: str, model: str | None, json_mode: bool, max_tokens: int | None = None
     ) -> tuple[str, str]:
         """Non-streaming call → (content, response_id). Retries 429/5xx."""
         self._require_configured()
@@ -221,6 +221,8 @@ class LLMClient:
         payload: dict[str, Any] = {"model": model, "messages": list(messages), "temperature": 0.3}
         if json_mode:
             payload["response_format"] = {"type": "json_object"}
+        if max_tokens:
+            payload["max_tokens"] = int(max_tokens)
 
         system_sha = system_prompt_sha256(messages)
         last: ProviderError | None = None
@@ -279,11 +281,12 @@ class LLMClient:
         schema_hint: str,
         role: str = "agent",
         model: str | None = None,
+        max_tokens: int | None = None,
     ) -> dict:
         """Structured call. One repair retry when the reply will not parse."""
         msgs = list(messages)
         msgs.append({"role": "system", "content": JSON_INSTRUCTION + schema_hint})
-        content, response_id = await self._complete_raw(msgs, role, model, json_mode=True)
+        content, response_id = await self._complete_raw(msgs, role, model, json_mode=True, max_tokens=max_tokens)
         try:
             parsed = extract_json(content)
         except Exception as first_error:
@@ -298,7 +301,9 @@ class LLMClient:
                     ),
                 },
             ]
-            content2, response_id2 = await self._complete_raw(repair, role, model, json_mode=True)
+            content2, response_id2 = await self._complete_raw(
+                repair, role, model, json_mode=True, max_tokens=max_tokens
+            )
             self._transcript(
                 {
                     "role": role,

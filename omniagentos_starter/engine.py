@@ -1190,6 +1190,9 @@ class Engine:
                 [{"role": "system", "content": system}, {"role": "user", "content": user}],
                 LESSON_SCHEMA,
                 role="reflector",
+                # One sentence and a few tags. Bounding the output keeps the last
+                # step of a finished run from being one of its slowest.
+                max_tokens=300,
             )
             text = str(body.get("text") or "").strip()
             if not text:
