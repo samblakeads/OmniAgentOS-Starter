@@ -1,0 +1,62 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "omniagentos-starter"
+version = "0.1.0"
+description = "OmniAgentOS Starter — hand it a goal; a team of agents plans, executes, critiques, verifies and loops until done."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "OmniRogue" }]
+keywords = ["agents", "orchestration", "llm", "fastapi", "sse"]
+classifiers = [
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+  "fastapi>=0.110",
+  "uvicorn>=0.27",
+  "httpx>=0.27",
+  "pyyaml>=6.0",
+  "pydantic>=2.6",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "pytest-asyncio>=0.23",
+  "ruff>=0.4",
+  "playwright>=1.44",
+]
+
+[project.scripts]
+omniagentos = "omniagentos_starter.cli:main"
+omniagentos-lite = "omniagentos_starter.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/omnirogue/OmniAgentOS-Starter"
+
+[tool.setuptools.packages.find]
+include = ["omniagentos_starter*"]
+
+[tool.setuptools.package-data]
+omniagentos_starter = [
+  "static/*",
+  "data/*.json",
+  "builtin_skills/*.md",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = ["E501", "B008"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests/unit"]
