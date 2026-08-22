@@ -765,7 +765,7 @@
       var t = state.tasks[id];
       var mark = t.status === "done" ? "✓" : t.status === "running" ? "●" : "○";
       var files = (t.files && t.files.length) ? " · " + t.files.length + " file(s)" : "";
-      return '<div class="task"><div class="task-title">' + mark + " " + esc(t.title || id) + "</div>" +
+      return '<div class="task" data-task-id="' + esc(t.id || id) + '"><div class="task-title">' + mark + " " + esc(t.title || id) + "</div>" +
         taskMemberHtml(t) +
         '<div class="task-skill">' + esc(t.skill_id || "") + " · " + esc(t.status) + files + "</div></div>";
     }).join("");
@@ -923,7 +923,7 @@
         var plan = "<p><b>" + (p.tasks || []).length + " tasks · " + (p.dod || []).length + " criteria</b></p>" +
           (p.tasks || []).map(function (t) {
             var task = state.tasks[t.id || t.task_id] || t;
-            return '<div class="task"><div class="task-title">' + esc(t.title) + "</div>" +
+            return '<div class="task" data-task-id="' + esc(t.id || t.task_id) + '"><div class="task-title">' + esc(t.title) + "</div>" +
               taskMemberHtml(task) +
               '<div class="task-skill">' + esc(t.id) + " · " + esc(t.skill_id) + "</div></div>";
           }).join("");

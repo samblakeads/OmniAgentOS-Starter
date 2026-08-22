@@ -1052,6 +1052,32 @@ def test_each_task_row_joins_team_delegated_into_per_task_state():
     assert 'params.get("run_id")' in APP_JS, "a finished run is re-opened at /?run_id="
 
 
+def test_each_task_row_emits_data_task_id_around_its_member_marker():
+    """D18 locates the delegated member via [data-task-id="<id>"] [data-testid="task-member"].
+
+    A mismatched join would still pass a page-wide exists() check: member
+    markers in team.delegated order sitting next to task rows in plan order.
+    The attribute has to be on the .task row itself, and the member marker
+    for that task has to live inside that same row.
+    """
+    render = APP_JS.split("function renderTasks()")[1].split("function renderCards()")[0]
+    assert 'class="task" data-task-id="' in render, (
+        "renderTasks() must emit data-task-id on the .task row (D18 JOIN selector)"
+    )
+    assert "esc(t.id || id)" in render or "esc(t.id)" in render
+    assert "taskMemberHtml(t)" in render, (
+        "the [data-testid=task-member] marker must be nested inside the same row"
+    )
+
+    plan = APP_JS.split('case "planner.plan"')[1].split("case ")[0]
+    assert 'class="task" data-task-id="' in plan, (
+        "planner.plan's inline .task rows are the other build path and must "
+        "emit data-task-id too"
+    )
+    assert "esc(t.id || t.task_id)" in plan or "esc(t.id)" in plan
+    assert "taskMemberHtml(task)" in plan
+
+
 def test_the_form_can_build_a_team_without_offering_self():
     assert 'data-testid="agent-team-choices"' in INDEX
     form = APP_JS.split("function openAgentForm(")[1].split("function closeAgentForm")[0]
