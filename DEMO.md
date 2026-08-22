@@ -4,6 +4,16 @@ Three goals, proven live, each showing a different part of the loop. Read
 this once before you're on stage; the beats are written to be said, not read
 off a screen.
 
+## DoD-parseable goals (machine-read by tests/dod/_harness.py::parse_demo_goals — keep byte-for-byte identical to the copy-paste blocks below)
+
+```dod-goals
+Write 3 Meta feed ad headlines for a $149 12-week strength program for women over 40. Each headline must be 30 characters or fewer, no exceptions.
+Policy: Refunds are available within 30 days of purchase for unused subscriptions. After 30 days, no refunds are issued except for billing errors, which are refunded in full once verified. Goal: A customer emailed asking for a refund on a subscription they bought 38 days ago, no billing error involved. Draft the reply, citing the specific policy clause for the decision.
+Draft a 5-email onboarding sequence for OmniAgentOS Starter and save each email as a separate file named email-1.md, email-2.md, email-3.md, email-4.md, and email-5.md in the workspace.
+```
+
+---
+
 ## Framing line (say this before you type anything)
 
 > "This is the open orchestration engine — the loop, the skills format, the

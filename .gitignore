@@ -13,3 +13,4 @@ __pycache__/
 evidence/live-receipts/*.json
 .pytest_cache/
 node_modules/
+*.egg-info/
