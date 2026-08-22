@@ -13,6 +13,17 @@
 # on state, port, or MAX_CONCURRENT_RUNS (each group is a distinct server
 # process). No assertion, threshold, or check in any Dn changed — only WHEN
 # each Dn's already-existing pytest invocation is scheduled.
+#
+# FAIL-CLOSED RUNNER NOTE (attested Grok audit finding F5): per-Dn status
+# used to live at a fixed path cleared by a best-effort delete at the start
+# of each run; if that delete silently failed, a stale PASS from a PRIOR
+# run could be honoured without pytest ever re-running (fail-open). Status
+# files now live under a fresh `mktemp -d` created at the start of THIS
+# run and are NEVER reused across runs; each one carries this run's nonce
+# plus the pytest exit code, and a missing file OR a file whose nonce does
+# not match this run's nonce reads as FAIL, never a silent stale PASS. A
+# failure to create or tear down that run directory is a runner-level
+# failure (`FAIL RUNNER`, exit 1), distinct from any Dn.
 
 set -u
 umask 077
@@ -34,6 +45,12 @@ fail_riders() {
 
 fail_boundaries() {
   echo "FAIL BOUNDARIES"
+  exit 1
+}
+
+fail_runner() {
+  echo "FAIL RUNNER" >&2
+  echo "FAIL RUNNER"
   exit 1
 }
 
@@ -108,11 +125,21 @@ fi
 cd "$REPO_ROOT" || exit 1
 export PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 
-# Clear any stale per-Dn status from a previous run so a crashed job can
-# never be misread as a leftover PASS. (find -delete, not rm, so a policy
-# guard scanning for a bare `rm` next to a secrets-env path never fires on
-# this script — this file sources connections.env a few lines above.)
-find "$EVIDENCE" -maxdepth 1 -name 'd[0-9]*.status' -delete 2>/dev/null
+# Fail-closed run directory: a fresh mktemp -d, never a fixed/reused path,
+# so there is no stale file for a silently-failed delete to leave behind
+# (the vulnerability this replaces: `find ... -delete` on a fixed path
+# could fail silently and a leftover PASS from a PRIOR run would then be
+# honoured without pytest ever re-running for THIS run). If creation fails
+# for any reason, that is a runner-level failure, not a Dn failure.
+RUNDIR="$(mktemp -d "${TMPDIR:-/tmp}/omniagentos-dod-run.XXXXXX" 2>/dev/null)"
+if [ -z "$RUNDIR" ] || [ ! -d "$RUNDIR" ]; then
+  echo "mktemp -d failed to create a fresh run directory" >&2
+  fail_runner
+fi
+# Per-run nonce: binds every status file to THIS invocation. A status file
+# missing this exact nonce (wrong run, stale copy, hand-edited, etc.) is
+# never honoured as a PASS — it reads as FAIL below.
+RUN_NONCE="dod-$$-$(date +%s)-${RANDOM:-0}-${RANDOM:-0}"
 
 # run_one_dn: identical semantics to the previous serial run_dn — same
 # pytest invocation, same evidence file, same PASS/FAIL determination —
@@ -120,21 +147,18 @@ find "$EVIDENCE" -maxdepth 1 -name 'd[0-9]*.status' -delete 2>/dev/null
 # so it is safe to call from a backgrounded subshell.
 run_one_dn() {
   local n="$1"
-  local file rc out
+  local file rc out status_file
   file="$(ls "$TESTS"/test_d$(printf '%02d' "$n")_*.py 2>/dev/null | head -n 1)"
   out="$EVIDENCE/d${n}-pytest.txt"
+  status_file="$RUNDIR/d${n}.status"
   if [ -z "$file" ]; then
     echo "missing test file" > "$out"
-    echo "FAIL" > "$EVIDENCE/d${n}.status"
+    printf '%s\n%s\n' "$RUN_NONCE" "127" > "$status_file"
     return
   fi
   "$PY" -u -m pytest --rootdir "$REPO_ROOT" -q --tb=line "$file" > "$out" 2>&1
   rc=$?
-  if [ "$rc" -eq 0 ]; then
-    echo "PASS" > "$EVIDENCE/d${n}.status"
-  else
-    echo "FAIL" > "$EVIDENCE/d${n}.status"
-  fi
+  printf '%s\n%s\n' "$RUN_NONCE" "$rc" > "$status_file"
 }
 
 # run_group: runs its member Dns SEQUENTIALLY within the group (each still
@@ -202,14 +226,28 @@ echo "dod.sh: parallel checks finished in ${ELAPSED}s" >&2
 # silently omitted.
 all_pass=1
 for n in 1 2 3 4 5 6 7 8 9 10 11 12 13 14; do
-  status_file="$EVIDENCE/d${n}.status"
-  if [ -f "$status_file" ] && [ "$(cat "$status_file")" = "PASS" ]; then
+  status_file="$RUNDIR/d${n}.status"
+  verdict="FAIL"
+  if [ -f "$status_file" ]; then
+    file_nonce="$(sed -n '1p' "$status_file")"
+    file_rc="$(sed -n '2p' "$status_file")"
+    numeric_rc=0
+    case "$file_rc" in
+      [0-9]|[0-9][0-9]|[0-9][0-9][0-9]) numeric_rc=1 ;;
+    esac
+    if [ "$file_nonce" = "$RUN_NONCE" ] && [ "$numeric_rc" -eq 1 ] && [ "$file_rc" -eq 0 ]; then
+      verdict="PASS"
+    fi
+  fi
+  if [ "$verdict" = "PASS" ]; then
     echo "PASS D${n}"
   else
     echo "FAIL D${n}"
     all_pass=0
     if [ ! -f "$status_file" ]; then
       echo "no status file written (crashed/killed before completion)" > "$EVIDENCE/d${n}-pytest.txt"
+    elif [ "$file_nonce" != "$RUN_NONCE" ]; then
+      echo "status file nonce mismatch (stale/foreign file) — treated as FAIL" > "$EVIDENCE/d${n}-pytest.txt"
     fi
   fi
 done
@@ -222,6 +260,15 @@ if [ -f "$AUDIT" ]; then
       audit_ok=1
     fi
   fi
+fi
+
+# Fail-closed teardown: this run's status files must not survive to be
+# mistaken for a fresh run's — but a failed teardown is a runner problem,
+# never silently ignored (that silence is exactly finding F5).
+find "$RUNDIR" -delete 2>/dev/null
+if [ -d "$RUNDIR" ]; then
+  echo "run directory $RUNDIR still exists after teardown" >&2
+  fail_runner
 fi
 
 if [ "$all_pass" -eq 1 ] && [ "$audit_ok" -eq 1 ]; then
