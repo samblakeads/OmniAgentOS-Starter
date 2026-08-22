@@ -117,7 +117,9 @@
   }
 
   function showError(tag, message) {
-    el("error-tag").textContent = tag || "ERROR";
+    // The tag element carries the tag ALONE — machine-checkable, and the thing
+    // a user can search for. Anything human-readable goes in the sibling.
+    el("error-tag").textContent = tag || "INTERNAL_ERROR";
     el("error-message").textContent = message || "";
     el("error-banner").hidden = false;
   }

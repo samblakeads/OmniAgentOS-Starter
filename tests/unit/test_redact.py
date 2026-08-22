@@ -24,7 +24,7 @@ def test_registered_secret_is_redacted_without_env():
 
 def test_bearer_and_key_shapes_are_redacted_even_when_unknown():
     assert "Bearer abcdef0123456789" not in R.redact("Authorization: Bearer abcdef0123456789")
-    assert "sk-livekey1234567890" not in R.redact("sk-livekey1234567890")
+    assert "sk-live-key-0987-6543" not in R.redact("sk-live-key-0987-6543")
 
 
 def test_redact_walks_dicts_lists_and_keys(monkeypatch):

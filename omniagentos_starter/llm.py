@@ -14,8 +14,10 @@ the provider's response id — never any prompt or completion content.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import time
+import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Any
 
@@ -43,6 +45,12 @@ def _error_tag_for_status(status: int) -> str:
     if status == 400:
         return "PROVIDER_BAD_RESPONSE"
     return "PROVIDER_UNAVAILABLE"
+
+
+def system_prompt_sha256(messages: Messages) -> str:
+    """Hash of the system prompt actually sent — proof of which agent spoke."""
+    system = "\n".join(str(m.get("content", "")) for m in messages if m.get("role") == "system")
+    return hashlib.sha256(system.encode("utf-8")).hexdigest()
 
 
 def extract_json(text: str) -> dict:
@@ -121,6 +129,10 @@ class LLMClient:
         self.timeout = timeout
         self.max_retries = max_retries
         self._retry_sleep = retry_sleep or (lambda attempt: asyncio.sleep(min(8.0, 0.5 * 2**attempt)))
+        # the provenance of the most recent call, so a caller can stamp the event
+        # it emits with the exact request that produced it
+        self.last_request_id: str = ""
+        self.last_response_id: str = ""
         register_secret(provider.api_key)
 
     # ------------------------------------------------------------- plumbing
@@ -167,10 +179,14 @@ class LLMClient:
         usage: dict,
         stream: bool,
         attempt: int,
+        request_id: str = "",
+        system_sha: str = "",
     ) -> None:
         prompt_tokens = int(usage.get("prompt_tokens") or 0)
         completion_tokens = int(usage.get("completion_tokens") or 0)
         self.budget.record(model, prompt_tokens, completion_tokens)
+        self.last_request_id = request_id or self.last_request_id
+        self.last_response_id = response_id or self.last_response_id
         self._emit(
             "llm.call",
             {
@@ -183,6 +199,8 @@ class LLMClient:
                 "provider_host": self.provider.host,
                 "http_status": status,
                 "response_id": response_id,
+                "request_id": request_id,
+                "system_prompt_sha256": system_sha,
                 "stream": stream,
                 "attempt": attempt,
                 "call_index": self.budget.calls,
@@ -204,18 +222,23 @@ class LLMClient:
         if json_mode:
             payload["response_format"] = {"type": "json_object"}
 
+        system_sha = system_prompt_sha256(messages)
         last: ProviderError | None = None
         for attempt in range(self.max_retries):
             self.budget.check()
             started = time.monotonic()
+            request_id = uuid.uuid4().hex
+            self.last_request_id = request_id
             async with self._client() as client:
                 try:
-                    resp = await client.post("/chat/completions", json=payload)
+                    resp = await client.post(
+                        "/chat/completions", json=payload, headers={"X-Request-Id": request_id}
+                    )
                 except (httpx.TimeoutException, httpx.TransportError) as exc:
                     last = ProviderError(
                         "PROVIDER_UNAVAILABLE", None, f"{type(exc).__name__} contacting {self.provider.host}"
                     )
-                    self._emit_call(role, model, started, None, "", {}, False, attempt)
+                    self._emit_call(role, model, started, None, "", {}, False, attempt, request_id, system_sha)
                     if attempt < self.max_retries - 1:
                         await self._retry_sleep(attempt)
                         continue
@@ -225,7 +248,7 @@ class LLMClient:
                 if status >= 400:
                     tag = _error_tag_for_status(status)
                     last = ProviderError(tag, status, self._safe_body(text))
-                    self._emit_call(role, model, started, status, "", {}, False, attempt)
+                    self._emit_call(role, model, started, status, "", {}, False, attempt, request_id, system_sha)
                     if status in _RETRYABLE_STATUS and attempt < self.max_retries - 1:
                         await self._retry_sleep(attempt)
                         continue
@@ -237,13 +260,16 @@ class LLMClient:
                     last = ProviderError(
                         "PROVIDER_BAD_RESPONSE", status, "provider returned a body with no message content"
                     )
-                    self._emit_call(role, model, started, status, "", {}, False, attempt)
+                    self._emit_call(role, model, started, status, "", {}, False, attempt, request_id, system_sha)
                     if attempt < self.max_retries - 1:
                         await self._retry_sleep(attempt)
                         continue
                     raise last from None
                 response_id = str(body.get("id") or "")
-                self._emit_call(role, model, started, status, response_id, body.get("usage") or {}, False, attempt)
+                self._emit_call(
+                    role, model, started, status, response_id, body.get("usage") or {},
+                    False, attempt, request_id, system_sha,
+                )
                 return content or "", response_id
         raise last or ProviderError("PROVIDER_UNAVAILABLE", None, "no attempt succeeded")
 
@@ -305,23 +331,28 @@ class LLMClient:
         self._require_configured()
         model = model or self.provider.model
         payload = {"model": model, "messages": list(messages), "temperature": temperature, "stream": True}
+        system_sha = system_prompt_sha256(messages)
         last: ProviderError | None = None
         for attempt in range(self.max_retries):
             self.budget.check()
             started = time.monotonic()
+            request_id = uuid.uuid4().hex
+            self.last_request_id = request_id
             chunks: list[str] = []
             usage: dict = {}
             response_id = ""
             status: int | None = None
             try:
                 async with self._client() as client:
-                    async with client.stream("POST", "/chat/completions", json=payload) as resp:
+                    async with client.stream(
+                        "POST", "/chat/completions", json=payload, headers={"X-Request-Id": request_id}
+                    ) as resp:
                         status = resp.status_code
                         if status >= 400:
                             body = await resp.aread()
                             tag = _error_tag_for_status(status)
                             last = ProviderError(tag, status, self._safe_body(body.decode("utf-8", "replace")))
-                            self._emit_call(role, model, started, status, "", {}, True, attempt)
+                            self._emit_call(role, model, started, status, "", {}, True, attempt, request_id, system_sha)
                             if status in _RETRYABLE_STATUS and attempt < self.max_retries - 1:
                                 await self._retry_sleep(attempt)
                                 continue
@@ -352,7 +383,7 @@ class LLMClient:
                 last = ProviderError(
                     "PROVIDER_UNAVAILABLE", None, f"{type(exc).__name__} streaming from {self.provider.host}"
                 )
-                self._emit_call(role, model, started, None, "", {}, True, attempt)
+                self._emit_call(role, model, started, None, "", {}, True, attempt, request_id, system_sha)
                 if attempt < self.max_retries - 1:
                     await self._retry_sleep(attempt)
                     continue
@@ -362,7 +393,9 @@ class LLMClient:
             if not usage:
                 prompt_chars = sum(len(str(m.get("content", ""))) for m in messages)
                 usage = {"prompt_tokens": prompt_chars // 4, "completion_tokens": len(text) // 4}
-            self._emit_call(role, model, started, status, response_id, usage, True, attempt)
+            self._emit_call(
+                role, model, started, status, response_id, usage, True, attempt, request_id, system_sha
+            )
             if not text.strip():
                 last = ProviderError("PROVIDER_BAD_RESPONSE", status, "provider streamed an empty completion")
                 if attempt < self.max_retries - 1:

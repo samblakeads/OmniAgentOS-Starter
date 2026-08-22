@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sys
 import threading
 import time
@@ -49,6 +50,8 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _serve(args, path: str = "/") -> int:
+    import socket
+
     import uvicorn
 
     from .api import create_app
@@ -60,13 +63,38 @@ def _serve(args, path: str = "/") -> int:
         return 2
     settings = Settings.from_env(host=args.host, port=args.port, data_dir=args.data_dir)
     app = create_app(settings)
-    url = f"http://{args.host}:{args.port}{path}"
+
+    # Bind the socket ourselves so the port is known before we serve. With
+    # --port 0 the kernel picks it, and anything supervising this process needs
+    # to be told which one rather than guessing (a guessed port can find someone
+    # else's server and report it as ours).
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        sock.bind((args.host, args.port))
+    except OSError as exc:
+        sock.close()
+        print(f"error: cannot bind {args.host}:{args.port}: {exc}", file=sys.stderr)
+        return 2
+    sock.listen(2048)
+    sock.set_inheritable(True)
+    port = int(sock.getsockname()[1])
+    settings.port = port
+
+    # The machine-readable line goes FIRST and straight to fd 1: a supervisor
+    # reading our stdout learns the port from the very first line it gets,
+    # whatever buffering sits between us. Everything below is for humans.
+    os.write(1, f"LISTENING port={port}\n".encode())
+
+    url = f"http://{args.host}:{port}{path}"
     print(f"OmniAgentOS Starter {VERSION} — dashboard on {url}")
     print(f"provider: {settings.provider.provider or 'none'} model: {settings.provider.model or '-'}")
-    print(f"skills:   {skills_dir()}")
+    print(f"skills:   {skills_dir()}", flush=True)
+
     if getattr(args, "open", False) or path != "/":
         threading.Thread(target=lambda: (time.sleep(1.2), webbrowser.open(url)), daemon=True).start()
-    uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
+    server = uvicorn.Server(uvicorn.Config(app, log_level="warning"))
+    server.run(sockets=[sock])
     return 0
 
 

@@ -212,7 +212,8 @@ def lessons_prompt_block(lessons: list[Lesson]) -> str:
     if not lessons:
         return ""
     body = "\n".join(
-        f"<recalled_lesson id=\"{lesson.id}\" run_id=\"{lesson.run_id}\">{lesson.text}</recalled_lesson>"
+        f"lesson {lesson.id} (from run {lesson.run_id}):\n"
+        f"<recalled_lesson>{lesson.text}</recalled_lesson>"
         for lesson in lessons
     )
     return (

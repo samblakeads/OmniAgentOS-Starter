@@ -1,6 +1,6 @@
 """Workspace tools — the only way an agent touches the filesystem.
 
-There is no shell tool, no exec, no subprocess: the allow-list is exactly
+There is no shell tool and no way to spawn a process: the allow-list is exactly
 read_file / write_file / list_files, and every path goes through
 :class:`WorkspaceGuard`, which fails closed. A guard whose root is the repo root,
 the package directory or the data directory refuses to exist at all.
@@ -23,6 +23,16 @@ MAX_DEPTH = 8
 
 class WorkspaceRefused(Exception):
     """The requested workspace root is not a safe dedicated directory."""
+
+
+class _Unset:
+    """Sentinel: the caller never said where the data directory is."""
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return "<unset>"
+
+
+UNSET = _Unset()
 
 
 def _forbidden_roots(data_dir: Path | None) -> list[Path]:
@@ -48,7 +58,15 @@ class WorkspaceGuard:
     a string prefix.
     """
 
-    def __init__(self, root: Path | str, data_dir: Path | str | None = None, create: bool = True):
+    def __init__(self, root: Path | str, data_dir: Path | str | None | _Unset = UNSET, create: bool = True):
+        # Fail closed on ignorance, not just on known-bad roots: a guard that was
+        # never told where the database lives cannot promise not to write into it.
+        # Pass data_dir=None to say explicitly "no data directory is in play".
+        if isinstance(data_dir, _Unset):
+            raise WorkspaceRefused(
+                f"refusing to guard {root}: pass data_dir=<path> (or an explicit None) so the "
+                "guard knows which directory it must never write into"
+            )
         root = Path(root).expanduser()
         if root.is_symlink():
             raise WorkspaceRefused(f"workspace root is a symlink: {root}")

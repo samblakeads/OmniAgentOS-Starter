@@ -24,7 +24,9 @@
 
 <div id="error-banner" class="banner banner-error" hidden>
   <span class="icon" aria-hidden="true">✕</span>
-  <span class="banner-tag" id="error-tag">ERROR</span>
+  <!-- This element's visible text is exactly the error_tag and nothing else:
+       the tag is the contract, the prose beside it is only commentary. -->
+  <span class="banner-tag" id="error-tag" data-testid="error-banner" role="alert">ERROR</span>
   <span class="banner-message" id="error-message"></span>
   <button id="error-dismiss" class="link-button" type="button">dismiss</button>
 </div>
@@ -41,18 +43,18 @@
     <li><code>OPENAI_API_KEY</code> — gpt-4.1-mini</li>
   </ul>
   <p class="first-run-tag">error_tag: <code id="first-run-tag">PROVIDER_NOT_CONFIGURED</code></p>
-  <button id="demo-button" class="primary" type="button">Watch the demo replay</button>
+  <button id="demo-button" data-testid="watch-demo" class="primary" type="button">Watch the demo replay</button>
   <p class="muted">The replay is a real recorded run, played back at reading speed.</p>
 </section>
 
 <main>
   <section class="panel goal-panel">
     <label for="goal" class="label">Your goal</label>
-    <textarea id="goal" rows="3" placeholder="Write exactly 3 ad headlines for an AI video tool, each under 40 characters, and explain in one line why each works"></textarea>
+    <textarea id="goal" data-testid="goal-input" rows="3" placeholder="Write exactly 3 ad headlines for an AI video tool, each under 40 characters, and explain in one line why each works"></textarea>
     <div class="goal-actions">
-      <button id="run-button" class="primary" type="button">Run</button>
+      <button id="run-button" data-testid="run-button" class="primary" type="button">Run</button>
       <button id="retry-button" class="secondary" type="button" hidden>Retry this goal</button>
-      <span id="busy" class="busy" hidden><span class="spinner" aria-hidden="true"></span><span id="busy-text">working…</span></span>
+      <span id="busy" data-testid="run-busy" class="busy" hidden><span class="spinner" aria-hidden="true"></span><span id="busy-text">working…</span></span>
       <span id="run-id" class="muted mono"></span>
     </div>
   </section>
@@ -84,7 +86,7 @@
 
     <article class="lane lane-wide" id="lane-deliverable" data-lane="deliverable">
       <header><span class="lane-icon" aria-hidden="true">▣</span><h2>Deliverable</h2><span class="lane-status" data-status>○ idle</span></header>
-      <div class="lane-body"><pre id="deliverable" class="deliverable"></pre></div>
+      <div class="lane-body"><pre id="deliverable" data-testid="deliverable" class="deliverable"></pre></div>
     </article>
   </section>
 

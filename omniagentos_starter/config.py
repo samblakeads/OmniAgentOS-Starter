@@ -115,12 +115,15 @@ def resolve_provider(env: dict | None = None) -> ProviderConfig:
     exception, so the server still serves the no-key first-run experience.
     """
     model_override = _env(env, "OMNIAGENTOS_MODEL")
+    # An explicit base URL wins for whichever key is in play — pointing the client
+    # at a gateway must never silently fall through to the vendor's own endpoint.
+    base_override = _env(env, "OMNIAGENTOS_BASE_URL")
 
     candidates = [
         (
             "OMNIAGENTOS_API_KEY",
             "custom",
-            _env(env, "OMNIAGENTOS_BASE_URL") or "https://api.x.ai/v1",
+            base_override or "https://api.x.ai/v1",
             "grok-4.3",
         ),
         ("XAI_API_KEY", "xai", "https://api.x.ai/v1", "grok-4.3"),
@@ -134,7 +137,7 @@ def resolve_provider(env: dict | None = None) -> ProviderConfig:
                 configured=True,
                 provider=provider,
                 model=model_override or model,
-                base_url=base_url.rstrip("/"),
+                base_url=(base_override or base_url).rstrip("/"),
                 api_key=key,
                 key_env=var,
             )
@@ -183,7 +186,7 @@ def assets_dir(env: dict | None = None) -> Path:
 
 def skills_dir(env: dict | None = None) -> Path:
     """Directory scanned for skill packs. A pure directory scan — no literals."""
-    override = _env(env, "OMNIAGENTOS_SKILLS_DIR")
+    override = _env(env, "OMNIAGENTOS_SKILLS_ROOT") or _env(env, "OMNIAGENTOS_SKILLS_DIR")
     if override:
         return Path(override).expanduser().resolve()
     found = _first_existing(Path.cwd() / "skills", REPO_ROOT / "skills")

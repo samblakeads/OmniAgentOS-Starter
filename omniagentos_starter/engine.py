@@ -45,7 +45,7 @@ from .llm import Budget, LLMClient
 from .memory import LESSON_PROHIBITION, Memory, lessons_prompt_block
 from .redact import ProviderError, WorkspaceEscape, redact
 from .skills import SkillLibrary, SkillPack, builtin_pack, load_skills
-from .tools import WorkspaceGuard, workspace_for_run
+from .tools import TOOL_NAMES, WorkspaceGuard, WorkspaceRefused, workspace_for_run
 
 ROLES = ("planner", "worker", "critic", "verifier")
 
@@ -68,6 +68,58 @@ LESSON_SCHEMA = '{"text":"one transferable lesson, max 300 chars","tags":["short
 
 def _esc(text: Any) -> str:
     return xml_escape(str(text if text is not None else ""))
+
+
+def verifier_is_verified(payload: Any) -> bool:
+    """The single predicate that decides whether a run was signed off.
+
+    True only for a dict carrying JSON boolean ``verified`` exactly True. None,
+    a string, a missing key, a truthy string like "true" — all False. A verdict
+    we could not read is a verdict that did not pass; fail-open here would let a
+    provider hiccup certify unfinished work.
+    """
+    if not isinstance(payload, dict):
+        return False
+    return payload.get("verified") is True
+
+
+def execute_worker_tool(root: str | Path, name: str, arguments: dict | None = None) -> dict:
+    """The worker's tool call path: read_file / write_file / list_files.
+
+    This is the ONLY way an agent touches the filesystem, and it is what the
+    engine calls for every file block a worker emits. Every rejection comes back
+    as a dict carrying ``error_tag`` — never a silent empty success, because a
+    tool that quietly does nothing teaches the model that the escape worked.
+    """
+    args = dict(arguments or {})
+    tool = str(name or "").strip()
+    if tool not in TOOL_NAMES:
+        return {"ok": False, "tool": tool, "error_tag": "BAD_REQUEST", "reason": f"unknown tool {tool!r}"}
+    try:
+        guard = WorkspaceGuard(root, data_dir=None)
+    except WorkspaceRefused as exc:
+        return {"ok": False, "tool": tool, "error_tag": "WORKSPACE_ESCAPE", "reason": str(exc)}
+
+    path = args.get("path", args.get("file", args.get("rel", "")))
+    try:
+        if tool == "write_file":
+            result = guard.write_file(path, args.get("content", args.get("text", "")))
+            return {"ok": True, "tool": tool, **result}
+        if tool == "read_file":
+            return {"ok": True, "tool": tool, "path": path, "content": guard.read_file(path)}
+        return {"ok": True, "tool": tool, "files": guard.list_files()}
+    except WorkspaceEscape as exc:
+        return {"ok": False, "tool": tool, **exc.as_dict()}
+    except FileNotFoundError:
+        return {"ok": False, "tool": tool, "error_tag": "BAD_REQUEST", "reason": "no such file", "path": str(path)}
+    except OSError as exc:
+        return {
+            "ok": False,
+            "tool": tool,
+            "error_tag": "WORKSPACE_ESCAPE",
+            "reason": type(exc).__name__,
+            "requested": str(path)[:120],
+        }
 
 
 def _clip(text: str, limit: int = MAX_ARTIFACT_CHARS) -> str:
@@ -328,6 +380,7 @@ class Engine:
             "memory.recalled",
             {
                 "matched": len(self.lessons),
+                "lesson_ids": [str(lesson.id) for lesson in self.lessons],
                 "lessons": [lesson.as_dict(now) for lesson in self.lessons],
                 "prohibition": LESSON_PROHIBITION,
             },
@@ -701,6 +754,8 @@ class Engine:
             {
                 "round": round_no,
                 "pass": not failures,
+                "request_id": self.llm.last_request_id,
+                "response_id": self.llm.last_response_id,
                 "verdicts": verdicts,
                 "failures": failures,
                 "checked": len(verdicts),
@@ -788,13 +843,17 @@ class Engine:
         )
         verdicts = await self._verdicts(system, user, ids, role="verifier", round_no=round_no)
         failures = [v for v in verdicts if not v["pass"]]
-        verified = not failures
+        # Route the outcome through the same predicate the run loop trusts, so a
+        # verdict that cannot be read comes back not-verified rather than True.
+        verified = verifier_is_verified({"verified": not failures})
         self.bus.emit(
             "verifier.verdict",
             {
                 "round": round_no,
                 "pass": verified,
                 "verified": verified,
+                "request_id": self.llm.last_request_id,
+                "response_id": self.llm.last_response_id,
                 "verdicts": verdicts,
                 "failures": failures,
                 "checked": len(verdicts),
@@ -847,6 +906,11 @@ class Engine:
                 verified, vfailures = await self._verify(round_no)
                 if verified:
                     run.verified = True
+                    run.status = "done"
+                    # Learn first, announce after: run.done is the terminal event of
+                    # the stream, so a lesson emitted after it would never reach a
+                    # client that (correctly) stops reading there.
+                    await self._reflect_guarded()
                     self._succeed()
                     return
                 failures = vfailures
@@ -954,6 +1018,13 @@ class Engine:
         return run
 
     # -------------------------------------------------------------- reflector
+    async def _reflect_guarded(self, timeout: float = 30.0) -> None:
+        """Reflection is best-effort: it never delays or fails a finished run for long."""
+        try:
+            await asyncio.wait_for(self.reflect(), timeout=timeout)
+        except Exception:
+            return
+
     async def reflect(self) -> None:
         """Write one transferable lesson — only from a run that finished verified."""
         run = self.run
@@ -984,7 +1055,13 @@ class Engine:
             lesson = self.memory.save_lesson(run.id, text, body.get("tags") or [], run.goal)
             self.bus.emit(
                 "lesson.saved",
-                {"lesson_id": lesson.id, "text": lesson.text, "tags": lesson.tags, "run_id": run.id},
+                {
+                    "id": lesson.id,
+                    "lesson_id": lesson.id,
+                    "text": lesson.text,
+                    "tags": lesson.tags,
+                    "run_id": run.id,
+                },
             )
         except Exception:
             return  # reflection is best-effort; it never changes a run's outcome
@@ -1045,10 +1122,6 @@ class Orchestrator:
             await engine.execute()
         finally:
             run.bus.close() if run.bus else None
-        if run.status == "done" and run.verified:
-            task = asyncio.create_task(engine.reflect())
-            self._reflectors.add(task)
-            task.add_done_callback(self._reflectors.discard)
         return run
 
     def start(self, run: RunState) -> RunState:

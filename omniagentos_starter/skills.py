@@ -18,7 +18,7 @@ from pathlib import Path
 
 import yaml
 
-from .config import builtin_skills_dir
+from .config import builtin_skills_dir, skills_dir
 
 SECTION_KEYS = {
     "WHEN TO USE": "when_to_use",
@@ -278,3 +278,26 @@ def load_skills(root: Path | str | None) -> SkillLibrary:
         lib.packs.append(pack)
     lib.packs.sort(key=lambda p: (p.category, p.slug))
     return lib
+
+
+_LIBRARY_CACHE: dict[str, SkillLibrary] = {}
+
+
+def default_library(root: Path | str | None = None, refresh: bool = False) -> SkillLibrary:
+    """The library for the configured skills root, scanned once per root."""
+    root = Path(root) if root else skills_dir()
+    key = str(root)
+    if refresh or key not in _LIBRARY_CACHE:
+        _LIBRARY_CACHE[key] = load_skills(root)
+    return _LIBRARY_CACHE[key]
+
+
+def select(goal: str, k: int = 2, root: Path | str | None = None) -> list[str]:
+    """Deterministic shortlist of skill ids for a goal — no model in the loop.
+
+    Same goal, same library, same answer, every time: routing you can reason
+    about beats routing you have to re-run to predict. Falls back to the
+    built-in general-assistant pack when nothing clears the match floor.
+    """
+    packs, _scores, _fallback = default_library(root).select(goal, k=k)
+    return [p.slug for p in packs]

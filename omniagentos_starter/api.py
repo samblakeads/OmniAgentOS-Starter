@@ -64,10 +64,25 @@ def git_head(root: Path | None = None) -> str:
     return ""
 
 
+def criterion_text(item) -> str:
+    """Accept an extra_dod entry as a plain string or as {"criterion": "..."}."""
+    if isinstance(item, str):
+        return item.strip()
+    if isinstance(item, dict):
+        for key in ("criterion", "text", "requirement", "dod"):
+            value = item.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return str(item or "").strip()
+
+
 class RunRequest(BaseModel):
     goal: str = Field(min_length=1, max_length=MAX_GOAL_CHARS)
     max_rounds: int | None = None
-    extra_dod: list[str] = Field(default_factory=list, max_length=MAX_EXTRA_DOD)
+    extra_dod: list[str | dict] = Field(default_factory=list, max_length=MAX_EXTRA_DOD)
+
+    def criteria(self) -> list[str]:
+        return [c for c in (criterion_text(x) for x in self.extra_dod) if c]
 
 
 class ProbeCache:
@@ -102,11 +117,31 @@ class ProbeCache:
         }
 
 
+def sse_data(event: dict) -> dict:
+    """The JSON object carried on an SSE `data:` line.
+
+    The payload is flattened to the top level (so a consumer reads
+    `data.task_id`, not `data.payload.task_id`) and `payload` is kept alongside
+    it for the dashboard. `id`, `ts` and `type` are canonical and always win.
+    """
+    payload = event.get("payload") or {}
+    body = dict(payload) if isinstance(payload, dict) else {"value": payload}
+    body["payload"] = payload
+    # The stream's own sequence number goes on the SSE `id:` line and into
+    # `event_id` — never into `id`, which belongs to whatever the payload is
+    # about (a lesson, for instance). Clobbering it silently renamed a lesson.
+    body["event_id"] = event["id"]
+    body["ts"] = event["ts"]
+    body["type"] = event["type"]
+    body["run_id"] = payload.get("run_id", event.get("run_id")) if isinstance(payload, dict) else event.get("run_id")
+    return body
+
+
 def _sse(event: dict) -> str:
     return (
         f"id: {event['id']}\n"
         f"event: {event['type']}\n"
-        f"data: {json.dumps({'id': event['id'], 'ts': event['ts'], 'type': event['type'], 'payload': event['payload']}, default=str)}\n\n"
+        f"data: {json.dumps(sse_data(event), default=str)}\n\n"
     )
 
 
@@ -169,17 +204,20 @@ def create_app(settings: Settings | None = None, orchestrator: Orchestrator | No
 
     @api.get("/skills")
     async def list_skills() -> JSONResponse:
-        return JSONResponse(redact(orch.library.as_dict()))
+        body = orch.library.as_dict()
+        body["items"] = body["skills"]
+        return JSONResponse(redact(body))
 
     @api.get("/lessons")
     async def list_lessons() -> JSONResponse:
-        return JSONResponse(redact({"lessons": orch.memory.all_lessons()}))
+        lessons = orch.memory.all_lessons()
+        return JSONResponse(redact({"lessons": lessons, "items": lessons}))
 
     # ------------------------------------------------------------------ runs
     @api.post("/runs")
     async def create_run(req: RunRequest) -> JSONResponse:
         try:
-            run = orch.create(req.goal, req.max_rounds, req.extra_dod)
+            run = orch.create(req.goal, req.max_rounds, req.criteria())
         except RunLimit as exc:
             return JSONResponse({"error_tag": "RUN_LIMIT", "message": str(exc)}, status_code=429)
         except ValueError as exc:
@@ -225,7 +263,7 @@ def create_app(settings: Settings | None = None, orchestrator: Orchestrator | No
         for run_id, summary in live.items():
             if run_id not in seen:
                 rows.insert(0, summary)
-        return JSONResponse(redact({"runs": rows}))
+        return JSONResponse(redact({"runs": rows, "items": rows}))
 
     @api.get("/runs/{run_id}")
     async def get_run(run_id: str) -> JSONResponse:

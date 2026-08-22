@@ -108,15 +108,16 @@ def test_a_run_streams_the_whole_production_line(settings):
     assert types[-1] == "run.done"
     for role_event in ("planner.plan", "worker.delta", "critic.verdict", "verifier.verdict"):
         assert role_event in types
-    assert all(events[i]["id"] < events[i + 1]["id"] for i in range(len(events) - 1))
+    assert all(events[i]["event_id"] < events[i + 1]["event_id"] for i in range(len(events) - 1))
+    assert all("payload" in e and e["type"] for e in events)
 
 
 def test_last_event_id_resumes_without_repeating(settings):
     with build(settings) as client:
         run_id = client.post("/api/runs", json={"goal": GOAL}).json()["run_id"]
         first = sse_events(client, run_id)
-        resumed = sse_events(client, run_id, headers={"Last-Event-ID": str(first[2]["id"])})
-    assert [e["id"] for e in resumed] == [e["id"] for e in first[3:]]
+        resumed = sse_events(client, run_id, headers={"Last-Event-ID": str(first[2]["event_id"])})
+    assert [e["event_id"] for e in resumed] == [e["event_id"] for e in first[3:]]
 
 
 def test_an_empty_goal_is_a_bad_request(settings):
