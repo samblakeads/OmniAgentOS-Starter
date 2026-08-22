@@ -18,6 +18,11 @@
 
 * { box-sizing: border-box; }
 
+/* `hidden` means hidden. Any author rule that sets a display value (our flex
+   rows do) otherwise outranks the UA stylesheet's [hidden] rule, which left the
+   error bar and the busy spinner permanently on screen. */
+[hidden] { display: none !important; }
+
 body {
   margin: 0;
   background: var(--bg);

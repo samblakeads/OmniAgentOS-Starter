@@ -8,7 +8,7 @@ PACK = """---
 name: Ad Copy Writer
 slug: ad-copy-writer
 category: marketing-content
-summary: Writes short direct-response ad headlines and body copy.
+summary: Writes short direct-response ad headlines and body copy for paid campaigns.
 ---
 
 ## WHEN TO USE
@@ -22,19 +22,49 @@ When the goal asks for ad headlines, hooks or ad copy.
 2. Cut
 
 ## OUTPUT SPEC
-A numbered list.
+A numbered list of headline variants.
 
 ## QUALITY CHECKS
 - Every headline is under the stated character limit.
 - No headline repeats another's angle.
 """
 
+# A second pack that shares no vocabulary with the first: a library of clones
+# would tell us nothing about routing.
+OTHER_PACK = """---
+name: Expense Categorizer
+slug: expense-categorizer
+category: finance-reporting
+summary: Sorts bank transactions into ledger categories for monthly bookkeeping.
+---
 
-def write_pack(root, category, slug, text=PACK):
+## WHEN TO USE
+When the goal asks to categorise expenses, invoices or bank transactions.
+
+## INPUTS
+- transaction export
+
+## WORKFLOW
+1. Group
+2. Reconcile
+
+## OUTPUT SPEC
+A table of transactions with a ledger category each.
+
+## QUALITY CHECKS
+- Every transaction receives exactly one ledger category.
+- Uncategorised rows are listed separately for review.
+"""
+
+
+def write_pack(root, category, slug, text=None):
+    text = text if text is not None else (OTHER_PACK if "expense" in slug or "finance" in category else PACK)
     d = root / category
     d.mkdir(parents=True, exist_ok=True)
     p = d / f"{slug}.md"
-    p.write_text(text.replace("ad-copy-writer", slug).replace("marketing-content", category), encoding="utf-8")
+    body = text.replace("ad-copy-writer", slug).replace("expense-categorizer", slug)
+    body = body.replace("marketing-content", category).replace("finance-reporting", category)
+    p.write_text(body, encoding="utf-8")
     return p
 
 
@@ -92,13 +122,14 @@ def test_selection_is_deterministic_and_scores_the_right_pack(tmp_path):
 
 
 def test_removing_a_category_makes_its_pack_unselectable(tmp_path):
+    goal = "Write ad headlines and body copy with a character limit for a paid campaign"
     path = write_pack(tmp_path, "marketing-content", "ad-copy-writer")
     lib = load_skills(tmp_path)
-    assert lib.select("ad headlines please")[0][0].slug == "ad-copy-writer"
+    assert lib.select(goal)[0][0].slug == "ad-copy-writer"
     path.unlink()
     lib2 = load_skills(tmp_path)
     assert lib2.count == 0
-    assert lib2.select("ad headlines please")[2] is True
+    assert lib2.select(goal)[2] is True
 
 
 def test_no_match_falls_back_to_the_builtin_pack_that_ships_in_the_package(tmp_path):

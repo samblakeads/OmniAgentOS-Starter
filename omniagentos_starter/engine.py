@@ -656,7 +656,7 @@ class Engine:
             if task.artifact:
                 task.history.append(task.artifact)
             written = self._apply_file_blocks(task, text)
-            task.artifact = _clip(self._strip_file_blocks(text) if written else text)
+            task.artifact = _clip(self._compose_artifact(text, written))
             task.fix_notes = []
             self.bus.emit(
                 "worker.finished",
@@ -684,6 +684,31 @@ class Engine:
     @staticmethod
     def _strip_file_blocks(text: str) -> str:
         return FILE_BLOCK_RE.sub("", text or "").strip()
+
+    def _compose_artifact(self, text: str, written: list[dict]) -> str:
+        """What the checkers get to judge.
+
+        A worker whose whole output was file blocks used to hand the Critic an
+        empty artifact, and the Critic — correctly, on the evidence it had —
+        failed every criterion while five perfectly good files sat in the
+        workspace. Files are work; the artifact carries them.
+        """
+        if not written:
+            return text
+        prose = self._strip_file_blocks(text)
+        parts = [prose] if prose else []
+        guard = self.run.workspace
+        budget = 8000
+        for item in written:
+            path = item.get("path", "")
+            try:
+                body = guard.read_file(path) if guard else ""
+            except Exception:
+                body = ""
+            body = body[: max(200, budget)]
+            budget = max(0, budget - len(body))
+            parts.append(f'<file path="{_esc(path)}">\n{_esc(body)}\n</file>')
+        return "\n\n".join(parts).strip()
 
     def write_file(self, rel: str, content: str, task_id: str = "") -> dict | None:
         """The single write path an agent has. An escape is loud, never silent."""
@@ -882,6 +907,11 @@ class Engine:
             tid = f.get("task_id") or self.criterion_task.get(f["criterion_id"], "")
             if tid in self.tasks and tid not in targets:
                 targets.append(tid)
+        if not targets and failures and len(self.tasks) == 1:
+            # With a single task there is nothing to disambiguate: the one task
+            # produced everything that failed. REPAIR_UNLOCALISED is for genuine
+            # ambiguity across a plan, not for a critic that left a field blank.
+            targets = [next(iter(self.tasks))]
         return targets
 
     def _attach_fixes(self, failures: list[dict], targets: list[str]) -> None:

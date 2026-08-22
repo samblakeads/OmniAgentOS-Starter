@@ -12,6 +12,7 @@ skill's own standards are what the Critic holds the work to.
 from __future__ import annotations
 
 import hashlib
+import math
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -38,8 +39,19 @@ _STOPWORDS = {
 }
 
 
+def _singular(token: str) -> str:
+    """Crude, deterministic singularisation — "headlines" and "headline" are one word."""
+    if len(token) > 3 and token.endswith("s") and not token.endswith(("ss", "us", "is")):
+        return token[:-1]
+    return token
+
+
 def tokenize(text: str) -> list[str]:
-    return [t for t in _TOKEN_RE.findall((text or "").lower()) if t not in _STOPWORDS and len(t) > 2]
+    return [
+        _singular(t)
+        for t in _TOKEN_RE.findall((text or "").lower())
+        if t not in _STOPWORDS and len(t) > 2
+    ]
 
 
 @dataclass
@@ -67,7 +79,28 @@ class SkillPack:
 
     @property
     def keywords(self) -> list[str]:
+        """What the pack says it is FOR — its declared trigger surface."""
         return tokenize(" ".join([self.name, self.summary, self.category.replace("-", " "), self.when_to_use]))
+
+    @property
+    def body_keywords(self) -> list[str]:
+        """Every word the pack uses. A goal usually names the artifact it wants
+        ("headlines"), and that word may live anywhere in the pack — so the whole
+        body is searchable, and rarity decides what the match is worth."""
+        return tokenize(
+            " ".join(
+                [
+                    self.name,
+                    self.summary,
+                    self.category.replace("-", " "),
+                    self.when_to_use,
+                    self.inputs,
+                    self.workflow,
+                    self.output_spec,
+                    " ".join(self.quality_checks),
+                ]
+            )
+        )
 
     def as_dict(self) -> dict:
         return {
@@ -164,6 +197,8 @@ class SkillLibrary:
     files_on_disk: int = 0
     root: str = ""
     builtin: SkillPack | None = None
+    _idf_cache: dict[str, float] | None = field(default=None, repr=False)
+    _df_cache: dict[str, int] | None = field(default=None, repr=False)
 
     @property
     def count(self) -> int:
@@ -202,18 +237,74 @@ class SkillLibrary:
         }
 
     # ---------------------------------------------------------------- select
+    # A word shared by most packs ("content", "review", "list") is not evidence of
+    # anything; a word in one pack ("headline", "refund", "onboarding") decides the
+    # match. That is what IDF measures, and it needs no model and no tuning table.
+    DECLARED_BOOST = 1.5
+    # What counts as evidence, stated so it holds for a 2-pack library and a
+    # 200-pack one alike: at least two words in common, and at least one of them
+    # either rare across the library or in what the pack says it is FOR. A
+    # half-matched specialist is worse than no specialist — its QUALITY CHECKS
+    # become binding criteria and the run then fails for things nobody asked for.
+    MIN_SHARED_TOKENS = 2
+    RARE_DF_FRACTION = 0.25
+    # How much evidence is "enough", in units of one decisive word (the rarest
+    # word this library has, found where the pack says what it is for). Roughly
+    # two and a quarter such words. Stating the bar in library-relative units is
+    # what makes it survive a 2-pack sample and the full 110-pack library alike:
+    # as the library grows, rare words get rarer and the bar rises with them.
+    MATCH_UNITS = 2.25
+    # The second pick has to be in the same league as the first, not merely next.
+    RUNNER_UP_RATIO = 0.7
+
+    def _idf(self) -> dict[str, float]:
+        if self._idf_cache is None:
+            n = max(1, len(self.packs))
+            self._idf_cache = {
+                t: math.log((n + 1) / (d + 1)) + 0.25 for t, d in self._document_frequency().items()
+            }
+        return self._idf_cache
+
+    def _document_frequency(self) -> dict[str, int]:
+        if self._df_cache is None:
+            df: dict[str, int] = {}
+            for pack in self.packs:
+                for token in set(pack.body_keywords):
+                    df[token] = df.get(token, 0) + 1
+            self._df_cache = df
+        return self._df_cache
+
+    def _qualifies(self, matched: set[str], declared: set[str]) -> bool:
+        """Enough shared words, at least one of them meaningful."""
+        if len(matched) < self.MIN_SHARED_TOKENS:
+            return False
+        df = self._document_frequency()
+        rare_cut = max(1, int(len(self.packs) * self.RARE_DF_FRACTION))
+        return any(t in declared or df.get(t, 1) <= rare_cut for t in matched)
+
+    def decisive_word_weight(self) -> float:
+        """What one decisive word is worth in this library — the scoring unit."""
+        idf = self._idf()
+        return (max(idf.values()) if idf else 1.0) * self.DECLARED_BOOST
+
     def score(self, goal: str) -> list[tuple[SkillPack, float]]:
-        goal_tokens = tokenize(goal)
-        goal_set = set(goal_tokens)
+        """Deterministic IDF-weighted overlap, zero for packs without real evidence."""
+        goal_set = set(tokenize(goal))
+        idf = self._idf()
         scored: list[tuple[SkillPack, float]] = []
         for pack in self.packs:
-            kws = pack.keywords
-            if not kws:
+            declared = set(pack.keywords)
+            matched = set(pack.body_keywords) & goal_set
+            phrase = pack.category.replace("-", " ") in (goal or "").lower()
+            if not phrase and not self._qualifies(matched, declared):
                 scored.append((pack, 0.0))
                 continue
-            hits = sum(1 for k in set(kws) if k in goal_set)
-            phrase_bonus = 1.0 if pack.category.replace("-", " ") in (goal or "").lower() else 0.0
-            scored.append((pack, round(hits + phrase_bonus, 3)))
+            score = sum(
+                idf.get(token, 0.25) * (self.DECLARED_BOOST if token in declared else 1.0) for token in matched
+            )
+            if phrase:
+                score += 2.0
+            scored.append((pack, round(score, 3)))
         scored.sort(key=lambda sp: (-sp[1], sp[0].slug))
         return scored
 
@@ -227,10 +318,11 @@ class SkillLibrary:
         a criterion the deliverable could never satisfy.
         """
         scored = self.score(goal)
-        hits = [(p, s) for p, s in scored if s > 0]
+        bar = self.MATCH_UNITS * self.decisive_word_weight()
+        hits = [(p, s) for p, s in scored if s >= bar]
         if hits:
-            floor = max(1.0, hits[0][1] / 2)
-            hits = [(p, s) for p, s in hits if s >= floor]
+            floor = hits[0][1] * self.RUNNER_UP_RATIO
+            hits = [hits[0]] + [(p, s) for p, s in hits[1:] if s >= floor]
         top = hits[:k]
         if not top:
             fallback = self.builtin or builtin_pack()

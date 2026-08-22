@@ -94,12 +94,24 @@ async def test_a_malformed_verdict_row_is_not_silently_a_pass(settings):
 
 # -------------------------------------------------------- repair localisation
 async def test_an_unlocalisable_repair_is_a_hard_error(settings):
-    """A failure the critic cannot attribute to a task must not re-run the plan blindly."""
+    """A failure the critic cannot attribute to a task must not re-run the plan blindly.
+
+    Ambiguity is the trigger: with several tasks in flight and no attribution,
+    re-running everything would be guessing. (With exactly one task there is
+    nothing to guess, and the repair goes to it.)
+    """
+    plan = {
+        "dod": [{"id": "d1", "criterion": "one"}],
+        "tasks": [
+            {"id": "t1", "title": "first", "skill_id": "general-assistant", "instruction": "x"},
+            {"id": "t2", "title": "second", "skill_id": "general-assistant", "instruction": "y"},
+        ],
+    }
 
     def unlocalised(call, ids):
         return [Script.verdict(i, i != ids[0], task_id="ghost-task") for i in ids]
 
-    run, _ = await run_goal(settings, Script(critic=unlocalised), GOAL)
+    run, _ = await run_goal(settings, Script(plan=plan, critic=unlocalised), GOAL)
     assert run.status == "failed"
     assert run.error_tag == "REPAIR_UNLOCALISED"
     assert payload_of(run, "run.failed")["error_tag"] == "REPAIR_UNLOCALISED"
@@ -354,16 +366,18 @@ async def test_a_declined_candidate_skill_leaves_no_criteria_behind(settings, tm
 
     root = tmp_path / "skills"
     (root / "marketing-content").mkdir(parents=True)
-    (root / "video").mkdir(parents=True)
+    (root / "longform").mkdir(parents=True)
     (root / "marketing-content" / "ad-copy.md").write_text(
         "---\nname: Ad Copy\nslug: ad-copy\ncategory: marketing-content\n"
-        "summary: writes ad headlines and hooks for video campaigns\n---\n\n## WHEN TO USE\nheadlines\n\n"
+        "summary: writes short ad headlines and hooks for a paid campaign\n---\n\n"
+        "## WHEN TO USE\nWhen the goal asks for ad headlines or hooks for a campaign.\n\n"
         "## QUALITY CHECKS\n- Every headline is under the limit.\n",
         encoding="utf-8",
     )
-    (root / "video" / "vsl-script.md").write_text(
-        "---\nname: VSL Script\nslug: vsl-script\ncategory: video\n"
-        "summary: writes long form ad headlines video sales letters\n---\n\n## WHEN TO USE\nvsl\n\n"
+    (root / "longform" / "vsl-script.md").write_text(
+        "---\nname: VSL Script\nslug: vsl-script\ncategory: longform\n"
+        "summary: writes a long form sales letter script with six labelled sections\n---\n\n"
+        "## WHEN TO USE\nWhen the goal asks for a sales letter script.\n\n"
         "## QUALITY CHECKS\n- All six VSL sections are present and labelled.\n",
         encoding="utf-8",
     )
@@ -375,7 +389,7 @@ async def test_a_declined_candidate_skill_leaves_no_criteria_behind(settings, tm
     script = Script(plan=plan)
     orch = make_orchestrator(settings, script)
     orch.library = load_skills(root)
-    run = orch.create("Write ad headlines for a video tool", 3, [])
+    run = orch.create("Write ad headlines and hooks for a campaign, plus a sales letter script", 3, [])
     await orch.execute(run)
 
     selected = payload_of(run, "skill.selected")["skill_ids"]
@@ -405,3 +419,40 @@ async def test_a_repair_prompt_names_the_checks_that_must_keep_passing(settings)
     assert "THESE CHECKS ALREADY PASS" in repair_prompt
     assert "START FROM <previous_attempt>" in repair_prompt
     assert script.payloads("worker")[1]["temperature"] < script.payloads("worker")[0]["temperature"]
+
+
+async def test_a_single_task_absorbs_a_repair_the_critic_did_not_attribute(settings):
+    """One task in the plan is unambiguous — do not throw the run away."""
+
+    def blank_task_ids(call, ids):
+        if call == 1:
+            return [Script.verdict(i, i != ids[0], task_id="") for i in ids]
+        return [Script.verdict(i, True) for i in ids]
+
+    run, _ = await run_goal(settings, Script(critic=blank_task_ids), GOAL)
+    assert run.status == "done"
+    assert payload_of(run, "repair.dispatched")["task_ids"] == ["t1"]
+
+
+async def test_files_a_worker_writes_are_visible_to_the_critic(settings):
+    """A worker whose whole output was files used to hand the critic nothing."""
+    plan = {
+        "dod": [{"id": "d1", "criterion": "five files exist"}],
+        "tasks": [
+            {
+                "id": "t1",
+                "title": "write files",
+                "skill_id": "general-assistant",
+                "instruction": "x",
+                "writes_files": True,
+            }
+        ],
+    }
+    body = "".join(f"=== FILE: email-{i}.md ===\nBody of email {i}\n=== END FILE ===\n" for i in range(1, 6))
+    script = Script(plan=plan, worker_text=body)
+    run, script = await run_goal(settings, script, GOAL)
+    assert run.status == "done"
+    artifact = payload_of(run, "worker.finished")["artifact"]
+    assert "Body of email 3" in artifact, "the artifact must carry the written files"
+    critic_prompt = script.prompt_text("critic")
+    assert "email-5.md" in critic_prompt and "Body of email 5" in critic_prompt
