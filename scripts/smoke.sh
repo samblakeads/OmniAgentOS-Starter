@@ -2,9 +2,14 @@
 # Post-start live-receipt smoke test (POSIX).
 #
 # Starts a real `omniagentos serve` on an ephemeral port, confirms
-# /api/health reports configured:true, submits one tiny live run, polls it
-# to completion (done|failed) within 120s, and writes a redacted receipt to
-# evidence/live-receipts/smoke-<ts>.json. Exits non-zero on any failure.
+# /api/health reports configured:true, submits one tiny live run, reads its
+# SSE event stream (falling back to polling) to completion within 120s, and
+# writes a redacted receipt to evidence/live-receipts/smoke-<ts>.json.
+#
+# Passing requires ALL of: run status == "done", run verified == true, a
+# non-empty deliverable, and >=4 distinct roles (planner/worker/critic/
+# verifier) observed in the events. A run that merely reaches status=done
+# with an empty deliverable or missing roles is NOT success — exits 1.
 #
 # This is a LIVE test: it spends real provider credits and requires a real
 # key (XAI_API_KEY / OPENROUTER_API_KEY / OPENAI_API_KEY) in the environment.
@@ -85,79 +90,167 @@ fi
 echo "==> health OK, configured:true"
 
 GOAL='Write a 3-bullet summary of why agent orchestration beats a chatbox.'
-START_TS=$(python3 -c 'import time; print(time.time())')
-
-RUN_JSON="$(curl -fsS -X POST "$BASE_URL/api/runs" \
-  -H 'Content-Type: application/json' \
-  -d "$(python3 -c 'import json,sys; print(json.dumps({"goal": sys.argv[1]}))' "$GOAL")" )" \
-  || fail "POST /api/runs failed"
-
-RUN_ID="$(printf '%s' "$RUN_JSON" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("id") or d.get("run_id") or "")' 2>/dev/null || true)"
-if [ -z "$RUN_ID" ]; then
-  fail "could not extract a run id from POST /api/runs response: $RUN_JSON"
-fi
-echo "==> run started: $RUN_ID"
-
-STATUS="unknown"
-DEADLINE=$((SECONDS + 120))
-while [ "$SECONDS" -lt "$DEADLINE" ]; do
-  RUN_STATE_JSON="$(curl -fsS "$BASE_URL/api/runs/$RUN_ID" 2>/dev/null || true)"
-  STATUS="$(printf '%s' "$RUN_STATE_JSON" | python3 -c 'import json,sys
-try:
-    d=json.load(sys.stdin)
-    print(d.get("status",""))
-except Exception:
-    print("")' 2>/dev/null || true)"
-  if [ "$STATUS" = "done" ] || [ "$STATUS" = "failed" ]; then
-    break
-  fi
-  sleep 2
-done
-
-END_TS=$(python3 -c 'import time; print(time.time())')
-ELAPSED_S=$(python3 -c "print(round($END_TS - $START_TS, 2))")
-
-if [ "$STATUS" != "done" ] && [ "$STATUS" != "failed" ]; then
-  fail "run $RUN_ID did not reach done|failed within 120s (last status: '$STATUS')"
-fi
-
 COMMIT_SHA="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo "unknown")"
 
-# Build the receipt, then run it through a defensive redaction pass — even
-# though every field here is a control value (no provider text), never trust
-# that blindly for anything that touches a live run.
-python3 - "$RECEIPT_FILE" "$TS" "$COMMIT_SHA" "$RUN_ID" "$STATUS" "$ELAPSED_S" <<'PYEOF'
+# Drive the run, read its SSE events for role coverage, and gate on the full
+# contract (status==done, verified==true, non-empty deliverable, >=4 roles)
+# in one place — see B5-F8: a thin {status} check alone let an empty-
+# deliverable or roleless run report SMOKE OK.
+set +e
+python3 - "$BASE_URL" "$GOAL" "$TS" "$COMMIT_SHA" "$RECEIPT_FILE" <<'PYEOF'
+import hashlib
 import json
 import re
 import sys
+import time
+import urllib.error
+import urllib.request
 
-receipt_file, ts, commit_sha, run_id, status, elapsed_s = sys.argv[1:7]
+BASE_URL, GOAL, TS, COMMIT_SHA, RECEIPT_FILE = sys.argv[1:6]
 
-receipt = {
-    "ts": ts,
-    "commit_sha": commit_sha,
-    "run_id": run_id,
-    "status": status,
-    "elapsed_s": float(elapsed_s),
+# Mirrors scripts/drill.py's ROLE_EVENTS (literal copy, not an import, so
+# this script has the same low coupling as scripts/lint_skills.py's mirror
+# of redact._SHAPE_PATTERNS).
+ROLE_EVENTS = {
+    "planner": ("planner.plan",),
+    "worker": ("worker.started", "worker.finished", "worker.delta"),
+    "critic": ("critic.verdict",),
+    "verifier": ("verifier.verdict",),
 }
 
-text = json.dumps(receipt, indent=2)
-key_patterns = [
-    re.compile(r"Bearer\s+\S+"),
-    re.compile(r"sk-[A-Za-z0-9]{10,}"),
-    re.compile(r"xai-[A-Za-z0-9]{10,}"),
-]
-for pat in key_patterns:
-    text = pat.sub("[REDACTED]", text)
+DEADLINE_S = 120.0
 
-with open(receipt_file, "w") as f:
-    f.write(text + "\n")
+
+def http_json(method: str, url: str, body: dict | None = None, timeout: float = 15.0) -> dict:
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    headers = {"Content-Type": "application/json"} if data is not None else {}
+    req = urllib.request.Request(url, data=data, method=method, headers=headers)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+start = time.time()
+try:
+    run = http_json("POST", BASE_URL + "/api/runs", {"goal": GOAL})
+except Exception as exc:
+    print(f"SMOKE FAIL: POST /api/runs failed: {exc!r}", file=sys.stderr)
+    sys.exit(1)
+
+run_id = run.get("run_id") or run.get("id") or ""
+if not run_id:
+    print(f"SMOKE FAIL: no run id in POST /api/runs response: {run!r}", file=sys.stderr)
+    sys.exit(1)
+print(f"==> run started: {run_id}")
+
+event_types: set[str] = set()
+req = urllib.request.Request(BASE_URL + f"/api/runs/{run_id}/events")
+try:
+    with urllib.request.urlopen(req, timeout=DEADLINE_S + 5) as resp:
+        for raw_line in resp:
+            if time.time() - start > DEADLINE_S:
+                break
+            line = raw_line.decode("utf-8", errors="replace").rstrip("\n")
+            if not line.startswith("data:"):
+                continue
+            payload = line[len("data:"):].strip()
+            if not payload:
+                continue
+            try:
+                obj = json.loads(payload)
+            except json.JSONDecodeError:
+                continue
+            etype = obj.get("type")
+            if etype:
+                event_types.add(etype)
+            if etype in ("run.done", "run.failed"):
+                break
+except (urllib.error.URLError, TimeoutError, OSError) as exc:
+    print(f"==> event stream ended early: {exc!r}", file=sys.stderr)
+
+# Poll fallback: if the stream closed/timed out before a terminal event (e.g.
+# server restarted the connection), give the final GET a few more tries
+# within what's left of the 120s budget rather than trusting the stream alone.
+summary: dict = {}
+poll_deadline = start + DEADLINE_S
+while True:
+    try:
+        summary = http_json("GET", BASE_URL + f"/api/runs/{run_id}", timeout=10.0)
+    except Exception as exc:
+        summary = {}
+        print(f"==> could not fetch run summary: {exc!r}", file=sys.stderr)
+    if summary.get("status") in ("done", "failed") or time.time() >= poll_deadline:
+        break
+    time.sleep(2)
+
+elapsed_s = round(time.time() - start, 2)
+
+status = summary.get("status", "unknown")
+verified = bool(summary.get("verified"))
+deliverable = summary.get("deliverable") or ""
+roles_seen = sorted(r for r, markers in ROLE_EVENTS.items() if any(m in event_types for m in markers))
+missing_roles = sorted(set(ROLE_EVENTS) - set(roles_seen))
+
+problems = []
+if status != "done":
+    problems.append(f"run status is {status!r}, not done")
+if not verified:
+    problems.append("run.verified is not true")
+if not deliverable.strip():
+    problems.append("deliverable is empty")
+if len(roles_seen) < 4:
+    problems.append("fewer than 4 roles seen in events; missing: " + ", ".join(missing_roles))
+
+deliverable_sha256 = hashlib.sha256(deliverable.encode("utf-8")).hexdigest()
+
+receipt = {
+    "magic": "OMNIAGENTOS-RECEIPT-1",
+    "kind": "smoke",
+    "ts": TS,
+    "commit_sha": COMMIT_SHA,
+    "run_id": run_id,
+    "status": status,
+    "verified": verified,
+    "roles_seen": roles_seen,
+    "event_types": sorted(event_types),
+    "deliverable_chars": len(deliverable),
+    "deliverable_sha256": deliverable_sha256,
+    "elapsed_s": elapsed_s,
+    "problems": problems,
+    "ok": not problems,
+}
+
+# Prefer the app's real redactor (this venv has it installed); fall back to a
+# small local shape scrub if the import ever fails so a receipt is never
+# written unredacted either way.
+try:
+    from omniagentos_starter.redact import redact as _redact
+
+    receipt = _redact(receipt)
+except Exception:
+    text = json.dumps(receipt)
+    for pat in (r"Bearer\s+\S+", r"sk-[A-Za-z0-9]{10,}", r"xai-[A-Za-z0-9]{10,}"):
+        text = re.sub(pat, "[REDACTED]", text)
+    receipt = json.loads(text)
+
+with open(RECEIPT_FILE, "w", encoding="utf-8") as f:
+    json.dump(receipt, f, indent=2)
+    f.write("\n")
+
+print(f"==> receipt written: {RECEIPT_FILE}")
+
+if problems:
+    print("SMOKE FAIL: " + "; ".join(problems), file=sys.stderr)
+    sys.exit(1)
+
+print(
+    f"SMOKE OK: run {run_id} done in {elapsed_s}s, verified, "
+    f"{len(roles_seen)} roles ({','.join(roles_seen)}), "
+    f"deliverable {len(deliverable)} chars"
+)
 PYEOF
+PY_EXIT=$?
+set -e
 
-echo "==> receipt written: $RECEIPT_FILE"
-
-if [ "$STATUS" = "failed" ]; then
-  fail "run $RUN_ID finished with status=failed"
+if [ "$PY_EXIT" -ne 0 ]; then
+  fail "run did not satisfy the smoke contract (status=done AND verified AND non-empty deliverable AND >=4 roles) — see receipt/output above"
 fi
-
-echo "SMOKE OK: run $RUN_ID done in ${ELAPSED_S}s"

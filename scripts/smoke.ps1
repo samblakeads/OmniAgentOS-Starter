@@ -1,9 +1,14 @@
 # Post-start live-receipt smoke test (Windows PowerShell equivalent of smoke.sh).
 #
 # Starts a real `omniagentos serve` on an ephemeral port, confirms
-# /api/health reports configured:true, submits one tiny live run, polls it
-# to completion (done|failed) within 120s, and writes a redacted receipt to
-# evidence/live-receipts/smoke-<ts>.json. Exits non-zero on any failure.
+# /api/health reports configured:true, submits one tiny live run, reads its
+# SSE event stream (falling back to polling) to completion within 120s, and
+# writes a redacted receipt to evidence/live-receipts/smoke-<ts>.json.
+#
+# Passing requires ALL of: run status == "done", run verified == true, a
+# non-empty deliverable, and >=4 distinct roles (planner/worker/critic/
+# verifier) observed in the events. A run that merely reaches status=done
+# with an empty deliverable or missing roles is NOT success — exits 1.
 #
 # This is a LIVE test: it spends real provider credits and requires a real
 # key (XAI_API_KEY / OPENROUTER_API_KEY / OPENAI_API_KEY) in the environment.
@@ -37,6 +42,16 @@ function Fail($msg) {
     Cleanup
     exit 1
 }
+
+# Mirrors scripts/drill.py's ROLE_EVENTS (literal copy, not an import — same
+# low-coupling pattern as scripts/lint_skills.py's mirror of redact shapes).
+$RoleEvents = [ordered]@{
+    planner  = @("planner.plan")
+    worker   = @("worker.started", "worker.finished", "worker.delta")
+    critic   = @("critic.verdict")
+    verifier = @("verifier.verdict")
+}
+$DeadlineSeconds = 120
 
 try {
     # Make sure `omniagentos` is on PATH; bootstrap a venv if this is a bare checkout.
@@ -85,42 +100,101 @@ try {
     $RunResponse = Invoke-RestMethod -Uri "$BaseUrl/api/runs" -Method Post `
         -ContentType "application/json" -Body (@{ goal = $Goal } | ConvertTo-Json)
 
-    $RunId = $RunResponse.id
-    if (-not $RunId) { $RunId = $RunResponse.run_id }
+    $RunId = $RunResponse.run_id
+    if (-not $RunId) { $RunId = $RunResponse.id }
     if (-not $RunId) { Fail "could not extract a run id from POST /api/runs response" }
     Write-Host "==> run started: $RunId"
 
+    # Read the SSE event stream directly (like curl -N in smoke.sh) so role
+    # coverage is checked from the real events, not inferred from status alone.
+    $EventTypes = New-Object System.Collections.Generic.HashSet[string]
+    try {
+        $HttpClient = New-Object System.Net.Http.HttpClient
+        $HttpClient.Timeout = [TimeSpan]::FromSeconds($DeadlineSeconds + 5)
+        $Stream = $HttpClient.GetStreamAsync("$BaseUrl/api/runs/$RunId/events").GetAwaiter().GetResult()
+        $Reader = New-Object System.IO.StreamReader($Stream)
+        while (-not $Reader.EndOfStream) {
+            if (((Get-Date) - $StartTs).TotalSeconds -gt $DeadlineSeconds) { break }
+            $line = $Reader.ReadLine()
+            if ($null -eq $line -or -not $line.StartsWith("data:")) { continue }
+            $payload = $line.Substring(5).Trim()
+            if (-not $payload) { continue }
+            try {
+                $obj = $payload | ConvertFrom-Json
+            } catch {
+                continue
+            }
+            if ($obj.type) { [void]$EventTypes.Add($obj.type) }
+            if ($obj.type -eq "run.done" -or $obj.type -eq "run.failed") { break }
+        }
+        $Reader.Dispose()
+        $HttpClient.Dispose()
+    } catch {
+        Write-Host "==> event stream ended early: $($_.Exception.Message)"
+    }
+
+    # Poll fallback: authoritative final state from the run resource, tried
+    # until terminal or the 120s budget runs out — same pattern as smoke.sh.
     $Status = "unknown"
-    $Deadline = (Get-Date).AddSeconds(120)
-    while ((Get-Date) -lt $Deadline) {
+    $Verified = $false
+    $Deliverable = ""
+    $Deadline = $StartTs.AddSeconds($DeadlineSeconds)
+    while ($true) {
         try {
-            $RunState = Invoke-RestMethod -Uri "$BaseUrl/api/runs/$RunId" -Method Get -TimeoutSec 5
+            $RunState = Invoke-RestMethod -Uri "$BaseUrl/api/runs/$RunId" -Method Get -TimeoutSec 10
             $Status = $RunState.status
+            $Verified = [bool]$RunState.verified
+            $Deliverable = if ($RunState.deliverable) { $RunState.deliverable } else { "" }
         } catch {
             $Status = "unknown"
         }
-        if ($Status -eq "done" -or $Status -eq "failed") { break }
+        if ($Status -eq "done" -or $Status -eq "failed" -or (Get-Date) -ge $Deadline) { break }
         Start-Sleep -Seconds 2
     }
 
     $ElapsedS = [math]::Round(((Get-Date) - $StartTs).TotalSeconds, 2)
 
-    if ($Status -ne "done" -and $Status -ne "failed") {
-        Fail "run $RunId did not reach done|failed within 120s (last status: '$Status')"
+    $RolesSeen = @()
+    foreach ($role in $RoleEvents.Keys) {
+        foreach ($marker in $RoleEvents[$role]) {
+            if ($EventTypes.Contains($marker)) { $RolesSeen += $role; break }
+        }
     }
+    $RolesSeen = $RolesSeen | Sort-Object -Unique
+    $MissingRoles = $RoleEvents.Keys | Where-Object { $_ -notin $RolesSeen } | Sort-Object
+
+    $Problems = @()
+    if ($Status -ne "done") { $Problems += "run status is '$Status', not done" }
+    if (-not $Verified) { $Problems += "run.verified is not true" }
+    if (-not $Deliverable.Trim()) { $Problems += "deliverable is empty" }
+    if ($RolesSeen.Count -lt 4) { $Problems += "fewer than 4 roles seen in events; missing: $($MissingRoles -join ', ')" }
+
+    $DeliverableBytes = [System.Text.Encoding]::UTF8.GetBytes($Deliverable)
+    $Sha256 = [System.Security.Cryptography.SHA256]::Create()
+    $DeliverableSha256 = ([BitConverter]::ToString($Sha256.ComputeHash($DeliverableBytes)) -replace '-', '').ToLower()
 
     $CommitSha = (git -C $RepoRoot rev-parse HEAD 2>$null)
     if (-not $CommitSha) { $CommitSha = "unknown" }
 
     $Receipt = [ordered]@{
-        ts         = $Ts
-        commit_sha = $CommitSha
-        run_id     = $RunId
-        status     = $Status
-        elapsed_s  = $ElapsedS
+        magic              = "OMNIAGENTOS-RECEIPT-1"
+        kind               = "smoke"
+        ts                 = $Ts
+        commit_sha         = $CommitSha
+        run_id             = $RunId
+        status             = $Status
+        verified           = $Verified
+        roles_seen         = @($RolesSeen)
+        event_types        = @($EventTypes | Sort-Object)
+        deliverable_chars  = $Deliverable.Length
+        deliverable_sha256 = $DeliverableSha256
+        elapsed_s          = $ElapsedS
+        problems           = $Problems
+        ok                 = ($Problems.Count -eq 0)
     }
     $ReceiptText = $Receipt | ConvertTo-Json
-    # Defensive redaction pass, matching smoke.sh, even though these are all control fields.
+    # Defensive redaction pass, matching smoke.sh's local fallback (this
+    # script has no import path into the Python package's real redactor).
     $ReceiptText = $ReceiptText -replace 'Bearer\s+\S+', '[REDACTED]'
     $ReceiptText = $ReceiptText -replace 'sk-[A-Za-z0-9]{10,}', '[REDACTED]'
     $ReceiptText = $ReceiptText -replace 'xai-[A-Za-z0-9]{10,}', '[REDACTED]'
@@ -128,11 +202,11 @@ try {
 
     Write-Host "==> receipt written: $ReceiptFile"
 
-    if ($Status -eq "failed") {
-        Fail "run $RunId finished with status=failed"
+    if ($Problems.Count -gt 0) {
+        Fail ("run did not satisfy the smoke contract: " + ($Problems -join "; "))
     }
 
-    Write-Host "SMOKE OK: run $RunId done in ${ElapsedS}s"
+    Write-Host "SMOKE OK: run $RunId done in ${ElapsedS}s, verified, $($RolesSeen.Count) roles ($($RolesSeen -join ',')), deliverable $($Deliverable.Length) chars"
 } finally {
     Cleanup
 }

@@ -45,6 +45,10 @@ _FM_LIST_RE = re.compile(r"^\[(.*)\]$")
 # filesystem paths. Deliberately broad — false positives are cheap here, a
 # leaked customer name or path is not.
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+# RFC 2606 reserves these domains for documentation/examples — never real,
+# registrable addresses, so a fictional EXAMPLE PROMPT contact ("jane.doe@
+# example.com") is not a leak the way a real customer/internal address is.
+_EXAMPLE_EMAIL_DOMAINS = ("example.com", "example.org", "example.net")
 IPV4_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
 LOCAL_PATH_RE = re.compile(r"(?:/Users/|/home/|C:\\\\Users\\\\)")
 HOSTNAME_RE = re.compile(
@@ -58,7 +62,41 @@ ALLOWED_URL_HOSTS = {
     "omnirogue.com",
     "www.omnirogue.com",
     "github.com",
+    "example.com",
+    "example.org",
+    "example.net",
 }
+
+# Provider-key shape patterns — mirrors omniagentos_starter/redact.py's
+# _SHAPE_PATTERNS (kept as a literal copy here, not an import, so this script
+# stays stdlib-only with zero dependency on the app package) plus a generic
+# long hex/base64 blob catch-all the redactor doesn't need (it only redacts
+# strings it's told about or that match a provider shape; a lint pass can
+# afford to be broader). Bare keys with no surrounding URL/email/hostname
+# must still be caught — that's exactly what B5-F6 found missing.
+KEY_SHAPE_PATTERNS = [
+    re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._\-~+/=]{8,}"),
+    re.compile(r"\b(?:sk|xai|or|gsk|pk)-[A-Za-z0-9._\-]{12,}"),
+    re.compile(r"(?i)\b(?:api[_-]?key|authorization|access[_-]?token)\"?\s*[:=]\s*\"?[A-Za-z0-9._\-]{12,}"),
+    re.compile(r"\b[A-Fa-f0-9]{32,}\b"),  # 32+ hex chars: raw key / hash-shaped blob
+]
+# 32+ base64-alphabet chars, checked separately (not folded into
+# KEY_SHAPE_PATTERNS above) because plain English joined by slashes — e.g. an
+# outcome-type field like "decision/update/brainstorm/approval" — matches the
+# bare character class too. Real base64 secrets/tokens virtually always mix
+# in a digit or an uppercase letter; slash-joined lowercase phrasing doesn't.
+# So: find candidate spans, then only flag ones that actually look random.
+BASE64_BLOB_RE = re.compile(r"\b[A-Za-z0-9+/]{32,}={0,2}\b")
+
+
+def _looks_like_secret_blob(candidate: str) -> bool:
+    has_digit = any(c.isdigit() for c in candidate)
+    has_upper = any(c.isupper() for c in candidate)
+    has_lower = any(c.islower() for c in candidate)
+    # require digit presence, and either case-mixing or no separators at all
+    # (a single unbroken run with a digit is still suspicious even if it's
+    # all-lowercase, e.g. an api token like "abc123...").
+    return has_digit and (has_upper or "/" not in candidate)
 
 
 def parse_front_matter(text: str, path: Path) -> tuple[dict, str, list[str]]:
@@ -173,7 +211,11 @@ def check_sections(body: str, path: Path) -> list[str]:
 def check_leaks(text: str, path: Path) -> list[str]:
     errors = []
     for m in EMAIL_RE.finditer(text):
-        errors.append(f"{path}: possible email address leaked: {m.group(0)!r}")
+        addr = m.group(0)
+        domain = addr.rsplit("@", 1)[-1].lower()
+        if domain in _EXAMPLE_EMAIL_DOMAINS:
+            continue
+        errors.append(f"{path}: possible email address leaked: {addr!r}")
     for m in IPV4_RE.finditer(text):
         errors.append(f"{path}: possible IP address leaked: {m.group(0)!r}")
     if LOCAL_PATH_RE.search(text):
@@ -185,6 +227,12 @@ def check_leaks(text: str, path: Path) -> list[str]:
         host = m.group(1).lower()
         if host not in ALLOWED_URL_HOSTS and not host.endswith(".omnirogue.com"):
             errors.append(f"{path}: URL host not on the allow-list: {host!r}")
+    for pat in KEY_SHAPE_PATTERNS:
+        for m in pat.finditer(text):
+            errors.append(f"{path}: possible provider-key shape leaked: {m.group(0)!r}")
+    for m in BASE64_BLOB_RE.finditer(text):
+        if _looks_like_secret_blob(m.group(0)):
+            errors.append(f"{path}: possible provider-key shape leaked: {m.group(0)!r}")
     return errors
 
 
@@ -221,7 +269,46 @@ def check_no_shell_exec() -> list[str]:
     return errors
 
 
+# Red-first self-test fixtures for the leak scanner (B5-F6): synthetic,
+# never-real secret shapes, checked against check_leaks() on every run before
+# any real pack is scanned. If this ever fails, the scanner itself has
+# regressed and every downstream "0 problems" result would be a false
+# negative — so a self-test failure is a distinct, louder failure than a
+# normal lint finding, and it blocks the real scan from running at all.
+_SELF_TEST_FIXTURES = [
+    ("bearer token", "Authorization: Bearer sk-abcdefghijklmnopqrstuv"),
+    ("xai- prefixed key, no surrounding url/email", "export XAI_API_KEY=xai-abcdefghijklmnopqrstuvwxyz0123456789"),
+    ("sk- prefixed key alone", "token is sk-liveabcdefghijklmnopqrstuvwx, keep it secret"),
+    ("api_key= assignment", 'api_key="abcdefghijklmnopqrstuvwx123456"'),
+    ("32+ hex blob", "raw value: 0123456789abcdef0123456789abcdef0123"),
+    ("32+ base64-ish blob", "blob: QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVowMTIzNDU2Nzg5"),
+]
+
+
+def self_test() -> list[str]:
+    """Prove check_leaks() still catches every planted key shape. Returns a
+    list of failure descriptions (empty = self-test passed)."""
+    failures = []
+    dummy = Path("selftest-fixture.md")
+    for label, text in _SELF_TEST_FIXTURES:
+        errs = check_leaks(text, dummy)
+        if not errs:
+            failures.append(
+                f"self-test regression: check_leaks() found nothing for the "
+                f"{label!r} fixture ({text!r}) — a real leak of this shape "
+                f"would silently pass lint_skills"
+            )
+    return failures
+
+
 def main() -> int:
+    self_test_failures = self_test()
+    if self_test_failures:
+        print("lint_skills: SELF-TEST FAILED — the leak scanner itself is broken, refusing to scan:\n", file=sys.stderr)
+        for f in self_test_failures:
+            print(f"  FAIL  {f}", file=sys.stderr)
+        return 1
+
     skills_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).resolve().parent.parent / "skills"
     if not skills_dir.is_dir():
         print(f"lint_skills: skills directory not found: {skills_dir}", file=sys.stderr)
