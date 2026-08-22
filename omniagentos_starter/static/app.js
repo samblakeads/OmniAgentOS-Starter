@@ -10,15 +10,63 @@
     "run.started", "memory.recalled", "skill.selected", "skill.selection_fallback",
     "plan.pruned", "planner.plan", "worker.started", "worker.delta", "worker.finished",
     "tool.write", "tool.error", "critic.verdict", "verdict.incomplete", "repair.dispatched",
-    "verifier.verdict", "run.done", "run.failed", "lesson.saved", "llm.call"
+    "verifier.verdict", "run.done", "run.failed", "lesson.saved", "llm.call",
+    "worker.reset", "skill.declined"
   ];
 
   var el = function (id) { return document.getElementById(id); };
   var state = {
     runId: null, source: null, goal: "", busySince: null, busyTimer: null,
     tasks: {}, cards: {}, dod: [], skills: {}, deliverable: "", files: [],
-    calls: 0, tokens: 0, cost: 0, rounds: 0, health: null
+    calls: 0, tokens: 0, cost: 0, rounds: 0, health: null,
+    inflight: false, streamErrors: 0, token: "", replay: false
   };
+
+  var MAX_STREAM_ERRORS = 5;
+
+  /* ----------------------------------------------------------------- auth
+     When the server was started with OMNIAGENTOS_TOKEN (required for any
+     non-loopback bind), every /api/* call needs it — including the ones no
+     JavaScript makes: the EventSource connection and the workspace file links.
+     An EventSource cannot send a header at all, so the token arrives in the page
+     URL once, is exchanged for a same-origin cookie, and is then scrubbed out of
+     the address bar so it does not live in history or in a Referer. */
+  function bootstrapToken() {
+    var params = new URLSearchParams(window.location.search);
+    var supplied = params.get("token") || "";
+    if (!supplied) { return Promise.resolve(false); }
+    state.token = supplied;
+    params.delete("token");
+    var rest = params.toString();
+    window.history.replaceState({}, "", window.location.pathname + (rest ? "?" + rest : ""));
+    return fetch("/api/session", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token: supplied })
+    }).then(function (r) { return r.ok; }).catch(function () { return false; });
+  }
+
+  function authHeaders(base) {
+    var headers = base || {};
+    if (state.token) { headers["Authorization"] = "Bearer " + state.token; }
+    return headers;
+  }
+
+  function apiFetch(path, options) {
+    var opts = options || {};
+    opts.headers = authHeaders(opts.headers || {});
+    opts.credentials = "same-origin";
+    return fetch(path, opts);
+  }
+
+  /* The two URLs the browser fetches without any JS in the loop. */
+  function tokenQuery() {
+    return state.token ? "?token=" + encodeURIComponent(state.token) : "";
+  }
+
+  function streamUrl(runId) {
+    return "/api/runs/" + encodeURIComponent(runId) + "/events" + tokenQuery();
+  }
 
   function esc(text) {
     return String(text === undefined || text === null ? "" : text)
@@ -31,41 +79,86 @@
     return p(date.getHours()) + ":" + p(date.getMinutes()) + ":" + p(date.getSeconds());
   }
 
+  /* --------------------------------------------------------------- brand
+     `logo_url` comes from an environment variable the operator set, and it is
+     assigned straight into an <img src>. A filesystem path 404s on the projector
+     AND puts a home directory in the DOM; a javascript:/data: value is an
+     unfiltered URL sink. Only a same-origin path or an https URL is a dashboard
+     URL, and anything else keeps the bundled default. */
+  function safeLogoUrl(raw) {
+    var value = String(raw || "").trim();
+    if (!value) { return null; }
+    if (value.charAt(0) === "/" && value.charAt(1) !== "/") { return value; }
+    if (/^https:\/\//i.test(value)) { return value; }
+    return null;
+  }
+
   /* ------------------------------------------------------------- health */
+  function applyHealth(h) {
+    state.health = h;
+    var logo = el("brand-logo");
+    if (h.brand) {
+      var url = safeLogoUrl(h.brand.logo_url);
+      if (url) {
+        logo.src = url; // brand.logo_url, only after safeLogoUrl() allowlisted it
+      } else if (h.brand.logo_url) {
+        showError("BAD_REQUEST",
+          "OMNIAGENTOS_BRAND_LOGO is not a dashboard URL — copy the file into assets/ " +
+          "and set /assets/<name>; keeping the bundled logo");
+      }
+      logo.alt = h.brand.name || "OmniRogue";
+    }
+    var chip = el("chip-provider");
+    if (h.configured) {
+      chip.textContent = "✓ provider ready — " + (h.provider || "?") + " / " + (h.model || "?");
+      chip.className = "chip ok";
+    } else {
+      chip.textContent = "✕ provider unavailable — " + (h.error_tag || "PROVIDER_NOT_CONFIGURED");
+      chip.className = "chip bad";
+    }
+    el("chip-skills").textContent = "🧩 " + (typeof h.skills === "number" ? h.skills : "?") + " skills loaded";
+    el("r-provider").textContent = h.provider || "–";
+    el("r-model").textContent = h.model || "–";
+    var firstRun = el("first-run");
+    firstRun.hidden = !!h.configured;
+    if (!h.configured) {
+      el("first-run-tag").textContent = h.error_tag || "PROVIDER_NOT_CONFIGURED";
+      // Run stays enabled on purpose: the run must be allowed to fail with the
+      // provider's own error_tag rather than being pre-empted by the UI.
+      el("run-button").disabled = false;
+    }
+    return h;
+  }
+
   function loadHealth() {
-    return fetch("/api/health").then(function (r) { return r.json(); }).then(function (h) {
-      state.health = h;
-      var logo = el("brand-logo");
-      if (h.brand) {
-        if (h.brand.logo_url) { logo.src = h.brand.logo_url; }
-        logo.alt = h.brand.name || "OmniRogue";
+    return apiFetch("/api/health").then(function (r) {
+      if (!r.ok) {
+        return r.json().catch(function () { return {}; }).then(function (body) {
+          throw { apiError: body, status: r.status };
+        });
       }
+      return r.json().then(applyHealth);
+    }).catch(function (err) {
+      // "Cannot reach the API" is NOT "no provider key". Reusing the first-run
+      // copy here sent operators looking for a key they had already set.
       var chip = el("chip-provider");
-      if (h.configured) {
-        chip.textContent = "✓ provider ready — " + (h.provider || "?") + " / " + (h.model || "?");
-        chip.className = "chip ok";
-      } else {
-        chip.textContent = "✕ provider unavailable — " + (h.error_tag || "PROVIDER_NOT_CONFIGURED");
-        chip.className = "chip bad";
-      }
-      el("chip-skills").textContent = "🧩 " + (h.skills || 0) + " skills loaded";
-      el("r-provider").textContent = h.provider || "–";
-      el("r-model").textContent = h.model || "–";
-      var firstRun = el("first-run");
-      firstRun.hidden = !!h.configured;
-      if (!h.configured) {
-        el("first-run-tag").textContent = h.error_tag || "PROVIDER_NOT_CONFIGURED";
-        el("run-button").disabled = false;
-      }
-      return h;
-    }).catch(function () {
-      el("chip-provider").textContent = "✕ dashboard cannot reach the API";
-      el("chip-provider").className = "chip bad";
+      var tag = (err && err.apiError && err.apiError.error_tag) || "INTERNAL_ERROR";
+      var message = (err && err.apiError && err.apiError.message) ||
+        "the dashboard cannot reach the API — is the server still running?";
+      chip.textContent = "✕ " + tag;
+      chip.className = "chip bad";
+      showError(tag, message);
+      // Keep probing: a laptop that lost Wi-Fi for four seconds should not need
+      // a page reload in front of an audience.
+      window.setTimeout(loadHealth, 4000);
     });
   }
 
   function loadSkills() {
-    return fetch("/api/skills").then(function (r) { return r.json(); }).then(function (data) {
+    return apiFetch("/api/skills").then(function (r) {
+      if (!r.ok) { throw new Error("HTTP " + r.status); }
+      return r.json();
+    }).then(function (data) {
       var packs = data.skills || [];
       packs.forEach(function (s) { state.skills[s.id] = s; });
       var body = el("skills-body");
@@ -79,7 +172,12 @@
           return '<div class="skill" data-skill="' + esc(s.id) + '"><b>' + esc(s.name) +
             '</b> <span class="skill-cat">· ' + esc(s.category) + "</span></div>";
         }).join("");
-    }).catch(function () { });
+    }).catch(function () {
+      // An empty catch left "Loading skill library…" on screen for the whole
+      // webinar — in-progress forever is indistinguishable from slow.
+      el("skills-body").innerHTML =
+        '<p class="muted">✕ INTERNAL_ERROR — the skill library could not be read.</p>';
+    });
   }
 
   /* --------------------------------------------------------------- busy */
@@ -96,16 +194,53 @@
       }, 1000);
     } else {
       busy.hidden = true;
+      state.busySince = null;
+      state.inflight = false;
+        el("demo-button").disabled = false;
       if (state.busyTimer) { clearInterval(state.busyTimer); state.busyTimer = null; }
     }
   }
 
+  var LANES = ["planner", "worker", "critic", "verifier", "deliverable"];
+
   function laneStatus(lane, text, cls) {
     var node = el("lane-" + lane);
-    if (!node) { return; }
+    if (!node) {
+      // A silent return here froze the Workers header on "○ idle" for a whole
+      // live run while every other lane lit up. A lane we cannot find is a bug
+      // in this file, and it says so.
+      showError("INTERNAL_ERROR", "dashboard lane '" + lane + "' is missing from the page");
+      return;
+    }
     node.querySelector("[data-status]").textContent = text;
     node.classList.remove("active", "pass", "fail");
     if (cls) { node.classList.add(cls); }
+  }
+
+  function highlightSkills(ids) {
+    var chosen = {};
+    (ids || []).forEach(function (id) { chosen[id] = true; });
+    var nodes = document.querySelectorAll("[data-skill]");
+    Array.prototype.forEach.call(nodes, function (node) {
+      var on = !!chosen[node.getAttribute("data-skill")];
+      node.classList.toggle("selected", on);
+      var mark = node.querySelector(".skill-mark");
+      if (on && !mark) {
+        mark = document.createElement("span");
+        mark.className = "skill-mark";
+        // Never colour alone: an icon and a word, per the stylesheet's contract.
+        mark.textContent = "▶ selected ";
+        node.insertBefore(mark, node.firstChild);
+      } else if (!on && mark) {
+        mark.remove();
+      }
+    });
+  }
+
+  function num(value, fallback) {
+    // `||` treats 0 and "" as missing, so a run that really used 0 rounds or
+    // cost $0 rendered as "never arrived".
+    return typeof value === "number" && isFinite(value) ? value : fallback;
   }
 
   function travel(n) {
@@ -183,17 +318,23 @@
       return;
     }
     tree.innerHTML = state.files.map(function (f) {
-      var href = "/api/runs/" + encodeURIComponent(state.runId) + "/files/" + f.path;
+      // Every segment is encoded: an unencoded name with a space, '#' or '?' in
+      // it broke the "click the file" beat, and '..' would be resolved by the
+      // browser against the origin before the workspace guard ever saw it.
+      var href = "/api/runs/" + encodeURIComponent(state.runId) + "/files/" + String(f.path).split("/").map(encodeURIComponent).join("/") + tokenQuery();
+      var size = typeof f.bytes === "number" && isFinite(f.bytes) ? f.bytes + " bytes" : "size unknown";
       return '<li>📄 <a href="' + esc(href) + '" target="_blank" rel="noopener">' + esc(f.path) + "</a> " +
-        '<span class="muted">(' + (f.bytes || 0) + " bytes)</span></li>";
+        '<span class="muted">(' + esc(size) + ")</span></li>";
     }).join("");
   }
 
   function renderReceipt(extra) {
     el("r-calls").textContent = state.calls;
     el("r-tokens").textContent = state.tokens;
-    el("r-cost").textContent = "$" + state.cost.toFixed(4);
-    el("r-rounds").textContent = state.rounds || "–";
+    // Number() first: a string here used to throw inside handle(), which then
+    // skipped setBusy(false) and left the spinner up for ever.
+    el("r-cost").textContent = "$" + num(Number(state.cost), 0).toFixed(4);
+    el("r-rounds").textContent = typeof state.rounds === "number" ? state.rounds : "–";
     if (extra && extra.elapsed_ms !== undefined) {
       el("r-elapsed").textContent = (extra.elapsed_ms / 1000).toFixed(1) + "s";
     }
@@ -224,6 +365,9 @@
 
       case "skill.selected": {
         (p.skills || []).forEach(function (s) { state.skills[s.id] = s; });
+        // Mark the chosen packs in #skills-body (data-skill + classList), so the
+        // Agent Skills column is not a static directory listing during a run.
+        highlightSkills(p.skill_ids || (p.skills || []).map(function (s) { return s.id; }));
         var names = (p.skills || []).map(function (s) { return s.name + " (" + s.category + ")"; });
         var host = el("planner-body");
         host.innerHTML = '<p>🧩 skills: ' + esc(names.join(", ") || (p.skill_ids || []).join(", ")) + "</p>" +
@@ -288,11 +432,14 @@
         break;
 
       case "tool.error":
-        showError(p.error_tag || "WORKSPACE_ESCAPE", (p.reason || "") + " — " + (p.requested || ""));
+        // The banner shows the REASON only. The path the agent asked for is, for
+        // an absolute-path attempt, a real filesystem path — redacted for keys,
+        // not for /Users — and this banner is on a projector.
+        showError(p.error_tag || "INTERNAL_ERROR", p.reason || "a tool call was refused");
         break;
 
       case "critic.verdict": {
-        state.rounds = p.round || state.rounds;
+        state.rounds = num(p.round, state.rounds);
         (p.verdicts || []).forEach(function (v) {
           var c = state.dod.filter(function (d) { return d.id === v.criterion_id; })[0];
           if (c) { c.state = v.pass ? "pass" : "fail"; }
@@ -316,7 +463,7 @@
       }
 
       case "repair.dispatched":
-        state.rounds = p.round || state.rounds;
+        state.rounds = num(p.round, state.rounds);
         (p.task_ids || []).forEach(function (id) {
           var task = state.tasks[id];
           Object.keys(state.cards).forEach(function (k) {
@@ -353,16 +500,23 @@
       }
 
       case "run.done":
-        state.deliverable = p.deliverable || state.deliverable;
+        if ("deliverable" in p) { state.deliverable = p.deliverable; }
         el("deliverable").textContent = state.deliverable;
-        state.rounds = p.rounds || state.rounds;
-        state.cost = p.est_cost_usd || state.cost;
-        state.tokens = p.tokens || state.tokens;
-        state.calls = p.llm_calls || state.calls;
-        state.files = p.files || state.files;
+        state.rounds = num(p.rounds, state.rounds);
+        state.cost = num(p.est_cost_usd, state.cost);
+        state.tokens = num(p.tokens, state.tokens);
+        state.calls = num(p.llm_calls, state.calls);
+        if (Array.isArray(p.files)) { state.files = p.files; }
         renderFiles();
         renderReceipt(p);
-        laneStatus("deliverable", "✓ delivered", "pass");
+        // A terminal event is not a signature. Only `verified === true` — the
+        // same strict predicate the engine uses — turns this lane green.
+        if (p.verified === true) {
+          laneStatus("deliverable", "✓ delivered", "pass");
+        } else {
+          laneStatus("deliverable", "✕ delivered but NOT verified", "fail");
+          showError("INTERNAL_ERROR", "the run finished without a verifier sign-off");
+        }
         setBusy(false);
         el("retry-button").hidden = true;
         break;
@@ -370,40 +524,117 @@
       case "run.failed":
         showError(p.error_tag || "INTERNAL_ERROR", p.message || "the run did not finish");
         laneStatus("deliverable", "✕ failed", "fail");
-        state.rounds = p.rounds || state.rounds;
+        state.rounds = num(p.rounds, state.rounds);
         renderReceipt(p);
         setBusy(false);
         el("retry-button").hidden = false;
         break;
 
+      case "worker.reset":
+        // The stream dropped mid-deliverable and is being written again. Clear
+        // what is on screen so attempt one is not welded to attempt two.
+        state.deliverable = "";
+        el("deliverable").textContent = "";
+        laneStatus("worker", "↻ stream dropped — rewriting", "fail");
+        break;
+
+      case "verdict.incomplete":
+        laneStatus(
+          "critic",
+          p.retry ? "◌ incomplete verdict — asking again" : "✕ incomplete verdict — treated as fail",
+          p.retry ? "active" : "fail"
+        );
+        break;
+
+      case "plan.pruned":
+        el("planner-body").innerHTML =
+          '<p class="muted">✂ plan capped: ' + esc(JSON.stringify(p.caps || {})) + "</p>" +
+          el("planner-body").innerHTML;
+        break;
+
+      case "skill.declined":
+        break;
+
       default:
+        // A type we do not render is not an error, but a type nobody has ever
+        // seen is worth saying out loud once, in the console, not on stage.
+        if (window.console && console.debug) { console.debug("unhandled event", type, p); }
         break;
     }
   }
 
   /* ---------------------------------------------------------- streaming */
+  function closeStream() {
+    if (state.source) {
+      state.source.close();
+      state.source = null;
+    }
+  }
+
   function attach(runId) {
-    if (state.source) { state.source.close(); }
+    if (typeof runId !== "string" || !runId) {
+      // `/api/runs/undefined/events` is a 404 the EventSource retries for ever,
+      // with the spinner up and Run disabled: the operator cannot even retry.
+      showError("BAD_REQUEST", "the server did not return a run_id");
+      setBusy(false);
+      return;
+    }
+    closeStream();
     state.runId = runId;
-    var source = new EventSource("/api/runs/" + encodeURIComponent(runId) + "/events");
+    state.streamErrors = 0;
+    var source = new EventSource(streamUrl(runId));
     state.source = source;
     EVENT_TYPES.forEach(function (type) {
       source.addEventListener(type, function (e) {
         var data;
-        try { data = JSON.parse(e.data); } catch (err) { return; }
-        handle(type, data);
-        if (type === "run.done" || type === "run.failed") { source.close(); }
+        try {
+          data = JSON.parse(e.data);
+        } catch (err) {
+          // A parse failure used to return silently — and because the browser
+          // had already consumed the `id:` line, the reconnect's Last-Event-ID
+          // skipped past the terminal event and the run never appeared to end.
+          showError("INTERNAL_ERROR", "the event stream sent something this dashboard could not read");
+          setBusy(false);
+          closeStream();
+          return;
+        }
+        var terminal = (type === "run.done" || type === "run.failed");
+        try {
+          handle(type, data);
+        } finally {
+          // A throw inside handle() must not be what keeps the stream open and
+          // the spinner spinning. A replay keeps talking past run.done (the
+          // lesson it saved is the last thing on the tape), so it closes on the
+          // server ending the stream instead.
+          if (terminal && !state.replay) { closeStream(); }
+        }
       });
     });
     source.onerror = function () {
-      if (source.readyState === EventSource.CLOSED) { setBusy(false); }
+      state.streamErrors += 1;
+      if (source.readyState === EventSource.CLOSED) {
+        setBusy(false);
+        return;
+      }
+      // readyState CONNECTING means the browser is retrying — which it will do
+      // for ever against a 404 or a dead server, spinner up, Run disabled.
+      if (state.streamErrors >= MAX_STREAM_ERRORS) {
+        closeStream();
+        setBusy(false);
+        el("retry-button").hidden = false;
+        showError("PROVIDER_UNAVAILABLE", "lost the event stream after several attempts");
+      }
     };
   }
 
   function resetRun(goal) {
+    // Close FIRST. Events from the previous run were still arriving into the
+    // state we had just wiped, mixing two runs' deliverables together.
+    if (state.source) { state.source.close(); state.source = null; }
     state.tasks = {}; state.cards = {}; state.dod = []; state.deliverable = "";
     state.files = []; state.calls = 0; state.tokens = 0; state.cost = 0; state.rounds = 0;
     state.goal = goal;
+    state.streamErrors = 0;
     el("deliverable").textContent = "";
     el("critic-cards").innerHTML = "";
     el("error-banner").hidden = true;
@@ -412,8 +643,9 @@
     el("planner-body").innerHTML = '<p class="muted">Planning…</p>';
     el("workers-body").innerHTML = '<p class="muted">No tasks yet.</p>';
     el("dod-list").innerHTML = '<li class="muted">The Definition of Done appears once the Planner has run.</li>';
+    highlightSkills([]);
     renderFiles();
-    ["planner", "worker", "critic", "verifier", "deliverable"].forEach(function (l) { laneStatus(l, "○ idle", null); });
+    LANES.forEach(function (l) { laneStatus(l, "\u25cb idle", null); });
   }
 
   function extraDod() {
@@ -422,14 +654,33 @@
       .filter(function (line) { return line.length > 0; });
   }
 
+  /* An in-flight lock that is NOT the busy spinner. The spinner may only appear
+     after a 2xx (the operator-vantage contract), but the button has to lock on
+     the click itself — two clicks used to start two live runs against the real
+     key, and their events interleaved in one dashboard. */
+  function lockControls(on) {
+    el("run-button").disabled = on;
+    el("demo-button").disabled = on;
+  }
+
+  function endRequest() {
+    state.inflight = false;
+    el("demo-button").disabled = false;
+    if (!state.busySince) { el("run-button").disabled = false; }
+  }
+
   function startRun() {
     var goal = el("goal").value.trim();
     if (!goal) { el("goal").focus(); return; }
+    if (state.inflight) { return; }
+    state.inflight = true;
+    lockControls(true);
+    state.replay = false;
     resetRun(goal);
     var body = { goal: goal };
     var criteria = extraDod();
     if (criteria.length) { body.extra_dod = criteria; }
-    fetch("/api/runs", {
+    apiFetch("/api/runs", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body)
@@ -438,28 +689,38 @@
     }).then(function (res) {
       if (!res.ok) {
         showError(res.body.error_tag || "BAD_REQUEST", res.body.message || "the run was refused");
+        endRequest();
         return;
       }
       setBusy(true);
       attach(res.body.run_id);
     }).catch(function (err) {
       showError("INTERNAL_ERROR", String(err));
+      endRequest();
     });
   }
 
   function startDemo() {
+    if (state.inflight) { return; }
+    state.inflight = true;
+    lockControls(true);
+    state.replay = true;
     resetRun(el("goal").value.trim());
-    fetch("/api/demo", { method: "POST" }).then(function (r) {
+    apiFetch("/api/demo", { method: "POST" }).then(function (r) {
       return r.json().then(function (body) { return { ok: r.ok, body: body }; });
     }).then(function (res) {
       if (!res.ok) {
         showError(res.body.error_tag || "PROVIDER_NOT_CONFIGURED", res.body.message || "no recorded run available");
+        endRequest();
         return;
       }
       if (res.body.goal) { el("goal").value = res.body.goal; }
       setBusy(true);
       attach(res.body.run_id);
-    }).catch(function (err) { showError("INTERNAL_ERROR", String(err)); });
+    }).catch(function (err) {
+      showError("INTERNAL_ERROR", String(err));
+      endRequest();
+    });
   }
 
   /* ------------------------------------------------------------- wiring */
@@ -471,11 +732,13 @@
     if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { startRun(); }
   });
 
-  loadHealth().then(function () {
+  bootstrapToken().then(function () {
+    loadSkills();
+    return loadHealth();
+  }).then(function () {
     var params = new URLSearchParams(window.location.search);
     if (params.get("demo") === "1") { startDemo(); }
     var replay = params.get("replay");
-    if (replay) { resetRun(""); attach(replay); }
+    if (replay) { state.replay = true; resetRun(""); attach(replay); }
   });
-  loadSkills();
 })();

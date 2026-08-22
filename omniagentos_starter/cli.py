@@ -50,14 +50,22 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--json", action="store_true", help="print the run summary as JSON")
 
     demo = sub.add_parser("demo", help="replay a recorded run (no API key needed)")
-    demo.add_argument("--port", type=int, default=8486)
+    # NOT 8486. `omniagentos demo` starts its own server, and the one moment an
+    # operator reaches for it live is the moment a server is already on 8486 —
+    # so the documented recovery used to die on "Address already in use". The
+    # in-dashboard "Replay demo" button is the mid-show fallback; this command is
+    # for rehearsal and for the case where the real server is gone.
+    demo.add_argument("--port", type=int, default=DEMO_PORT)
     demo.add_argument("--host", default="127.0.0.1")
     demo.add_argument("--data-dir", default="var")
     demo.add_argument("--headless", action="store_true", help="print the replay to stdout instead of serving")
     return p
 
 
-def _serve(args, path: str = "/") -> int:
+DEMO_PORT = 8487
+
+
+def _serve(args, path: str = "/", fallback_to_any_port: bool = False) -> int:
     import socket
 
     import uvicorn
@@ -81,9 +89,25 @@ def _serve(args, path: str = "/") -> int:
     try:
         sock.bind((args.host, args.port))
     except OSError as exc:
-        sock.close()
-        print(f"error: cannot bind {args.host}:{args.port}: {exc}", file=sys.stderr)
-        return 2
+        if not fallback_to_any_port:
+            sock.close()
+            print(f"error: cannot bind {args.host}:{args.port}: {exc}", file=sys.stderr)
+            return 2
+        # The replay is the thing the operator wants; the port number is not.
+        # Refusing to start because a port is busy fails the one command whose
+        # whole job is to work when something else has gone wrong.
+        print(
+            f"note: {args.host}:{args.port} is in use; taking an ephemeral port instead. "
+            "If that is your own server, the dashboard's 'Replay demo' button plays the "
+            "same recording there without starting a second process.",
+            file=sys.stderr,
+        )
+        try:
+            sock.bind((args.host, 0))
+        except OSError as exc2:
+            sock.close()
+            print(f"error: cannot bind {args.host}: {exc2}", file=sys.stderr)
+            return 2
     sock.listen(2048)
     sock.set_inheritable(True)
     port = int(sock.getsockname()[1])
@@ -207,7 +231,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "demo":
         if args.headless:
             return asyncio.run(_demo_headless(args))
-        return _serve(args, path="/?demo=1")
+        return _serve(args, path="/?demo=1", fallback_to_any_port=True)
     return 2
 
 

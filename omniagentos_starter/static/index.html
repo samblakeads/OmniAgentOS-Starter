@@ -43,8 +43,11 @@
     <li><code>OPENAI_API_KEY</code> — gpt-4.1-mini</li>
   </ul>
   <p class="first-run-tag">error_tag: <code id="first-run-tag">PROVIDER_NOT_CONFIGURED</code></p>
-  <button id="demo-button" data-testid="watch-demo" class="primary" type="button">Watch the demo replay</button>
-  <p class="muted">The replay is a real recorded run, played back at reading speed.</p>
+  <p class="muted">
+    No key yet? Use the <b>Replay demo</b> button next to Run — it plays back a real recorded
+    run at reading speed. (The control deliberately does not live in this panel: this panel is
+    hidden the moment a key IS configured, which is exactly when a provider hiccup needs it.)
+  </p>
 </section>
 
 <main>
@@ -56,6 +59,10 @@
       placeholder="One per line — e.g. Every headline is under 40 characters"></textarea>
     <div class="goal-actions">
       <button id="run-button" data-testid="run-button" class="primary" type="button">Run</button>
+      <!-- The stage fallback. It used to live inside #first-run, which is hidden
+           whenever a key IS configured — i.e. hidden for the whole webinar, which
+           is exactly when a provider hiccup needs it. -->
+      <button id="demo-button" data-testid="watch-demo" class="secondary" type="button">Replay demo</button>
       <button id="retry-button" class="secondary" type="button" hidden>Retry this goal</button>
       <span id="busy" data-testid="run-busy" class="busy" hidden><span class="spinner" aria-hidden="true"></span><span id="busy-text">working…</span></span>
       <span id="run-id" class="muted mono"></span>
@@ -69,7 +76,9 @@
     </article>
     <div class="arrow" aria-hidden="true">→<span class="token" id="token-1"></span></div>
 
-    <article class="lane" id="lane-workers" data-lane="worker">
+    <!-- id must match the token laneStatus() is called with ("worker"): the
+         mismatch froze this header on "idle" for an entire live run. -->
+    <article class="lane" id="lane-worker" data-lane="worker">
       <header><span class="lane-icon" aria-hidden="true">▤</span><h2>Workers</h2><span class="lane-status" data-status>○ idle</span></header>
       <div class="lane-body" id="workers-body"><p class="muted">No tasks yet.</p></div>
     </article>

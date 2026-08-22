@@ -166,3 +166,7 @@ textarea {
   position: sticky; bottom: 0;
 }
 .receipt b { color: var(--text); font-weight: 600; }
+
+/* A selected skill is named as well as tinted: status is never colour-only. */
+.skill.selected { border-left: 3px solid var(--ok); padding-left: 8px; }
+.skill .skill-mark { color: var(--ok); font-weight: 700; }
