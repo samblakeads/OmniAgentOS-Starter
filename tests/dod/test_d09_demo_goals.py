@@ -6,13 +6,14 @@ import hashlib
 
 import httpx
 from _harness import (
+    check_planted_criterion,
     collect_sse,
     event_payload,
     event_type,
     events_of,
     get_run,
     live_xai_base_url_ok,
-    parse_demo_goals,
+    parse_demo_goals_with_dod,
     repo_head_sha,
     require_live,
     spawn_serve,
@@ -25,14 +26,20 @@ from _harness import (
 def test_d09_three_demo_goals_bijection_and_loop():
     require_live()
     assert live_xai_base_url_ok()
-    goals = parse_demo_goals()
-    assert len(goals) == 3
+    pairs = parse_demo_goals_with_dod()
+    assert len(pairs) == 3
+    goals = [g for g, _ in pairs]
 
     srv = spawn_serve()
     receipts = []
     try:
-        for i, goal in enumerate(goals, 1):
-            rid = start_run(srv.base_url, goal)
+        for i, (goal, extra_dod_criteria) in enumerate(pairs, 1):
+            extra_dod = (
+                [{"criterion": c} for c in extra_dod_criteria]
+                if extra_dod_criteria
+                else None
+            )
+            rid = start_run(srv.base_url, goal, extra_dod=extra_dod)
             events = collect_sse(srv.base_url, rid, timeout_s=150.0)
             run = get_run(srv.base_url, rid)
             assert "status" in run and run["status"] == "done", (
@@ -48,6 +55,11 @@ def test_d09_three_demo_goals_bijection_and_loop():
             )
 
             if i == 1:
+                assert extra_dod_criteria, (
+                    "DEMO goal 1 must carry a ` ||| dod: <criterion>` planted "
+                    "rubric so the D4 loop is reliably exhibited on stage, "
+                    "not left to LLM nondeterminism"
+                )
                 types = [event_type(e) for e in events]
                 # D4 loop: critic fail -> repair.dispatched -> worker.finished -> verifier
                 c_fail = False
@@ -67,6 +79,14 @@ def test_d09_three_demo_goals_bijection_and_loop():
                 )
                 vobj = event_payload(v[-1])
                 assert "verified" in vobj and vobj["verified"] is True
+                # Mechanically re-check the deliverable against the planted
+                # criterion(s) — a verifier that rubber-stamps verified=True
+                # without satisfying the rubric it was given must still fail.
+                for crit in extra_dod_criteria:
+                    assert check_planted_criterion(deliverable, crit), (
+                        f"DEMO goal 1 deliverable does not mechanically satisfy "
+                        f"planted extra_dod criterion {crit!r}: {deliverable!r}"
+                    )
 
             if i == 3:
                 files_resp = httpx.get(srv.base_url + f"/api/runs/{rid}/files", timeout=15.0)

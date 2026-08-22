@@ -544,17 +544,49 @@ def validate_receipt(receipt: dict[str, Any] | str | Path) -> dict[str, Any]:
     return receipt
 
 
+_DOD_SUFFIX_RE = re.compile(r"\s*\|\|\|\s*dod:\s*(.+?)\s*$", re.I)
+
+
+def _split_dod_suffix(line: str) -> tuple[str, list[str]]:
+    """Split a trailing ` ||| dod: <criterion>` off a dod-goals fence line.
+
+    BINDING separator (implementers/U2 must match exactly): a fenced
+    ```dod-goals line may end with literal ` ||| dod: <criterion text>`.
+    Everything before the separator is the goal; everything after is one
+    critic/verifier-only rubric criterion posted as `extra_dod`. A line with
+    no separator carries no extra_dod (empty list).
+    """
+    m = _DOD_SUFFIX_RE.search(line)
+    if not m:
+        return line.strip(), []
+    goal = line[: m.start()].strip()
+    return goal, [m.group(1).strip()]
+
+
 def parse_demo_goals(demo_md: Path | None = None) -> list[str]:
     """Parse exactly 3 literal goal strings from DEMO.md.
 
     BINDING (implementers/U2 must match): DEMO.md at repo root contains either
 
-    1. a fenced block tagged dod-goals with exactly three non-empty lines, or
+    1. a fenced block tagged dod-goals with exactly three non-empty lines
+       (each optionally suffixed ` ||| dod: <criterion>` — stripped here; see
+       parse_demo_goals_with_dod() for the paired form), or
     2. three lines of the form `GOAL: <literal>` (optionally `GOAL 1:` etc.), or
     3. three headings/lines `Goal 1:` / `Goal 2:` / `Goal 3:` followed by the
        literal text on the rest of the line or the following quoted line.
 
     Quoted wrapping (`"..."` or `«...»`) is stripped. No other prose is a goal.
+    """
+    return [g for g, _ in parse_demo_goals_with_dod(demo_md)]
+
+
+def parse_demo_goals_with_dod(
+    demo_md: Path | None = None,
+) -> list[tuple[str, list[str]]]:
+    """Like parse_demo_goals() but returns (goal, [extra_dod_criterion, ...]) pairs.
+
+    Only the fenced ```dod-goals form carries the ` ||| dod: <criterion>`
+    suffix; the GOAL:/Goal N: forms never carry extra_dod (empty list).
     """
     path = demo_md or (REPO_ROOT / "DEMO.md")
     if not path.is_file():
@@ -563,16 +595,20 @@ def parse_demo_goals(demo_md: Path | None = None) -> list[str]:
 
     fenced = re.search(r"```dod-goals\s*\n(.*?)```", text, re.S | re.I)
     if fenced:
-        goals = [ln.strip() for ln in fenced.group(1).splitlines() if ln.strip()]
-        if len(goals) != 3:
+        lines = [ln.strip() for ln in fenced.group(1).splitlines() if ln.strip()]
+        if len(lines) != 3:
             raise AssertionError(
-                f"dod-goals fence must contain exactly 3 goals, got {len(goals)}"
+                f"dod-goals fence must contain exactly 3 goals, got {len(lines)}"
             )
-        return [_unquote(g) for g in goals]
+        pairs: list[tuple[str, list[str]]] = []
+        for ln in lines:
+            goal, dod = _split_dod_suffix(ln)
+            pairs.append((_unquote(goal), dod))
+        return pairs
 
     labeled = re.findall(r"^GOAL(?:\s*[1-3])?:\s*(.+?)\s*$", text, re.M | re.I)
     if len(labeled) >= 3:
-        return [_unquote(g) for g in labeled[:3]]
+        return [(_unquote(g), []) for g in labeled[:3]]
 
     numbered: list[str] = []
     for n in (1, 2, 3):
@@ -585,12 +621,58 @@ def parse_demo_goals(demo_md: Path | None = None) -> list[str]:
             break
         numbered.append(_unquote(m.group(1)))
     if len(numbered) == 3:
-        return numbered
+        return [(g, []) for g in numbered]
 
     raise AssertionError(
         "DEMO.md does not contain 3 parseable literal goals. "
         "Add a ```dod-goals fence with three lines, or `GOAL: ...` lines."
     )
+
+
+def check_planted_criterion(deliverable: str, criterion: str) -> bool:
+    """Best-effort MECHANICAL re-check of a planted extra_dod criterion.
+
+    Not a substitute for the verifier — this is the oracle independently
+    re-deriving the same judgement the criterion states, so a verifier that
+    rubber-stamps `verified=True` without actually satisfying the planted
+    rubric still fails D9. Supports the two literal forms PLAN.md/D4 use:
+    - an exact phrase requirement: `exact phrase 'X'` / `contains 'X'`
+      (quotes: ' " smart-quotes); checked case-sensitively as stated.
+    - a word-count ceiling: `under N words` / `fewer than N words` /
+      `less than N words` / `<= N words` / `at most N words`.
+    Any additional clause type in the criterion is not mechanically checkable
+    here and is left to the verifier; returns True only for clauses this
+    function can itself verify (never a vacuous pass on unparseable text —
+    callers must additionally confirm the criterion was actually planted).
+    """
+    ok = True
+    checked_any = False
+
+    for m in re.finditer(
+        r"(?:exact phrase|contains(?:\s+the)?(?:\s+exact)?\s+phrase|contains)\s*"
+        r"['\"“”](.+?)['\"“”]",
+        criterion,
+        re.I,
+    ):
+        checked_any = True
+        phrase = m.group(1)
+        if phrase not in deliverable:
+            ok = False
+
+    m = re.search(
+        r"(?:under|fewer than|less than|at most|<=)\s*(\d+)\s*words",
+        criterion,
+        re.I,
+    )
+    if m:
+        checked_any = True
+        limit = int(m.group(1))
+        if len(deliverable.split()) >= limit:
+            ok = False
+
+    if not checked_any:
+        return False
+    return ok
 
 
 def _unquote(s: str) -> str:
