@@ -557,7 +557,8 @@ def create_app(settings: Settings | None = None, orchestrator: Orchestrator | No
             return StreamingResponse(replay_stored(), media_type="text/event-stream", headers=_sse_headers())
 
         bus = run.bus
-        queue, backlog = bus.subscribe(last_id)
+        subscription = bus.subscribe(last_id)
+        queue, backlog = subscription.queue, subscription.backlog
         # A recorded run keeps emitting after run.done — the lesson it saved is
         # the last thing on the tape. Cutting the stream at the terminal event
         # means the Memory column never fills during the canned demo, so a replay
@@ -574,9 +575,17 @@ def create_app(settings: Settings | None = None, orchestrator: Orchestrator | No
                     if event["type"] in ("run.done", "run.failed") and stop_at_terminal:
                         terminal = True
                         break
-                if bus.closed:
-                    # Nothing more will ever arrive: a reconnect that waited on
-                    # the queue here would hang until the client gave up.
+                if subscription.closed:
+                    # The bus was already finished when we subscribed, so no
+                    # sentinel is coming and waiting on the queue would hang
+                    # until the client gave up. This must be the state AT
+                    # SUBSCRIBE, not `bus.closed` now: a run that finished while
+                    # we were yielding the backlog has already put its remaining
+                    # events — including run.done — into our queue, and reading
+                    # the live flag here dropped them. On a fast machine the
+                    # backlog was usually complete and the bug never showed; a
+                    # slow CI runner landed in the window and the client saw a
+                    # stream that stopped mid-run.
                     terminal = True
                 if not terminal:
                     while True:

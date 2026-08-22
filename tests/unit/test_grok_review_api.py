@@ -22,6 +22,24 @@ from omniagentos_starter.tools import UNSET, WorkspaceRefused, workspace_for_run
 GOAL = "Write exactly 3 ad headlines"
 
 
+def _wait_for_terminal(client, run_id: str, timeout_s: float = 60.0) -> str:
+    """Poll until the run reaches a terminal status, or say plainly that it did not.
+
+    A generous bound, because the only thing a tight one buys is a red build on
+    somebody else's slow CI runner — and a bound that is hit still fails, with
+    the status it was stuck on, rather than falling through to an assertion about
+    a run that had not started yet.
+    """
+    deadline = time.monotonic() + timeout_s
+    status = "unknown"
+    while time.monotonic() < deadline:
+        status = client.get(f"/api/runs/{run_id}").json().get("status", "unknown")
+        if status in ("done", "failed"):
+            return status
+        time.sleep(0.01)
+    raise AssertionError(f"run {run_id} never reached a terminal status in {timeout_s}s (last: {status!r})")
+
+
 def _client(settings, script=None):
     from fastapi.testclient import TestClient
 
@@ -71,10 +89,7 @@ def test_a_downloaded_workspace_file_is_redacted(settings, tmp_path):
     with client:
         register_secret(TEST_KEY)
         run_id = client.post("/api/runs", json={"goal": GOAL}).json()["run_id"]
-        for _ in range(200):
-            if client.get(f"/api/runs/{run_id}").json().get("status") in ("done", "failed"):
-                break
-            time.sleep(0.01)
+        _wait_for_terminal(client, run_id)
         listing = client.get(f"/api/runs/{run_id}/files")
         assert listing.status_code == 200
         downloaded = client.get(f"/api/runs/{run_id}/files/leak.md")

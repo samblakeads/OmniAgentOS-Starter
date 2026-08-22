@@ -24,7 +24,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 from xml.sax.saxutils import escape as xml_escape
 
 from .agents import Agent, AgentRoster, builtin_agent, load_agents, safe_agent_slug
@@ -179,6 +179,16 @@ def _clip(text: str, limit: int = MAX_ARTIFACT_CHARS) -> str:
 
 
 # --------------------------------------------------------------------- bus --
+class Subscription(NamedTuple):
+    """One subscriber's view of a bus, taken atomically."""
+
+    queue: asyncio.Queue
+    backlog: list[dict]
+    # True when the bus was ALREADY closed at the moment of subscribing — i.e.
+    # no sentinel is coming for this queue.
+    closed: bool
+
+
 class EventBus:
     """In-process pub/sub with subscribe-before-replay and monotonic ids.
 
@@ -225,11 +235,29 @@ class EventBus:
             self.done = True
         return event
 
-    def subscribe(self, last_id: int = 0) -> tuple[asyncio.Queue, list[dict]]:
+    def subscribe(self, last_id: int = 0) -> Subscription:
+        """Register a queue and snapshot the backlog in ONE synchronous step.
+
+        `closed` is part of that step on purpose. It answers "was this bus
+        already finished when I subscribed?", which is the only form of the
+        question a subscriber can act on safely:
+
+        * closed BEFORE we subscribed — `close()` has already handed out its
+          None sentinels and ours was not among them, so nothing will ever
+          arrive on this queue and waiting on it would hang until the client
+          gives up;
+        * closed AFTER we subscribed — `close()` put a None in THIS queue, so
+          the queue must be drained to the sentinel or the last events of the
+          run are simply dropped.
+
+        Reading `bus.closed` separately cannot tell those apart: by the time the
+        caller looks, a bus that closed a moment ago looks identical to one that
+        closed an hour ago, and the events already sitting in the queue are lost.
+        """
         q: asyncio.Queue = asyncio.Queue()
         self._subs.add(q)
         backlog = [e for e in self.events if e["id"] > last_id]
-        return q, backlog
+        return Subscription(queue=q, backlog=backlog, closed=self.closed)
 
     def unsubscribe(self, q: asyncio.Queue) -> None:
         self._subs.discard(q)

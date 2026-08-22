@@ -334,7 +334,7 @@ async def test_the_event_bus_replays_only_what_a_subscriber_missed(settings):
     bus = EventBus("run-1")
     bus.emit("a", {})
     bus.emit("b", {})
-    queue, backlog = bus.subscribe(last_id=1)
+    queue, backlog, _closed = bus.subscribe(last_id=1)
     assert [e["type"] for e in backlog] == ["b"]
     bus.emit("c", {})
     live = await queue.get()
@@ -347,7 +347,7 @@ async def test_a_subscriber_joining_mid_flight_sees_every_event_exactly_once(set
 
     bus = EventBus("run-2")
     bus.emit("first", {})
-    queue, backlog = bus.subscribe()
+    queue, backlog, _closed = bus.subscribe()
     bus.emit("second", {})
     seen = [e["id"] for e in backlog]
     while not queue.empty():

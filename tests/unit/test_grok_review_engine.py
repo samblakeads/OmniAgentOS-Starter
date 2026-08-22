@@ -156,20 +156,28 @@ async def test_a_worker_failure_cancels_its_siblings(tmp_path):
     }
     engine.order = ["t1", "t2"]
     finished = {"t2": False}
+    # Events, not sleeps. The ordering this test needs is "t1 has failed and t2
+    # has not finished", and an event says exactly that; a duration only says
+    # "probably, on this machine, today".
+    t2_started = asyncio.Event()
+    t2_may_finish = asyncio.Event()
 
     async def worker(task, round_no, sem):
         async with sem:
             if task.id == "t1":
-                await asyncio.sleep(0.02)
+                await t2_started.wait()  # fail only once the sibling is genuinely running
                 raise ProviderError("PROVIDER_UNAVAILABLE", 503, "down")
-            await asyncio.sleep(0.4)
+            t2_started.set()
+            # Never set. A cancelled sibling never gets past this line; an
+            # uncancelled one hangs the test, which is the honest failure.
+            await t2_may_finish.wait()
             finished["t2"] = True
             engine.bus.emit("worker.finished", {"task_id": "t2"})
 
     engine._run_worker = worker
     with pytest.raises(ProviderError):
-        await engine._run_workers(["t1", "t2"], 1)
-    await asyncio.sleep(0.5)
+        await asyncio.wait_for(engine._run_workers(["t1", "t2"], 1), timeout=10)
+    assert t2_started.is_set(), "setup: the sibling must have started before t1 failed"
     assert finished["t2"] is False, "a sibling worker kept running after the run failed"
     assert "worker.finished" not in [e["type"] for e in engine.bus.events]
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 from pathlib import Path
 
@@ -21,6 +22,28 @@ from .redact import redact
 SCHEMA = "omniagentos-replay-1"
 MAX_GAP_MS = 450
 MIN_GAP_MS = 12
+
+# The replay is paced so it reads at human speed on a stage. Nothing else wants
+# that: a test wants the same event sequence as fast as the machine will produce
+# it, and an operator rehearsing may want it slower. OMNIAGENTOS_REPLAY_SPEED is
+# a multiplier on the pace — 20 is twenty times faster, 0.5 is half speed — so
+# neither has to reach in and monkeypatch the constants above.
+SPEED_ENV_VAR = "OMNIAGENTOS_REPLAY_SPEED"
+DEFAULT_SPEED = 1.0
+MAX_SPEED = 1000.0
+
+
+def configured_speed(env: dict | None = None) -> float:
+    """The pacing multiplier, from the environment, never zero or negative."""
+    raw = (os.environ if env is None else env).get(SPEED_ENV_VAR, "")
+    try:
+        speed = float(str(raw).strip())
+    except (TypeError, ValueError):
+        return DEFAULT_SPEED
+    if speed <= 0:
+        # "Instant" is a legitimate ask; a negative or zero divisor is not.
+        return MAX_SPEED
+    return min(speed, MAX_SPEED)
 
 
 class ReplayUnavailable(Exception):
@@ -59,7 +82,7 @@ async def replay_into(
     bus: EventBus,
     run: RunState,
     path: Path | str | None = None,
-    speed: float = 1.0,
+    speed: float | None = None,
     sleep=asyncio.sleep,
 ) -> RunState:
     """Re-emit a recorded run onto `bus` at paced speed.
@@ -69,6 +92,7 @@ async def replay_into(
     """
     data = load_replay(path)
     events = data.get("events") or []
+    speed = configured_speed() if speed is None else speed
     run.status = "running"
     run.started_ts = time.time()
     run.replay = True

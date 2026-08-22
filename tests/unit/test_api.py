@@ -24,7 +24,15 @@ def build(settings: Settings, script: Script | None = None) -> TestClient:
     return client
 
 
-def sse_events(client: TestClient, run_id: str, headers=None) -> list[dict]:
+def sse_events(client: TestClient, run_id: str, headers=None, until_terminal: bool = False) -> list[dict]:
+    """Read a run's SSE stream to the end.
+
+    The server closes the stream when the run is over, so reading to EOF is the
+    wait — there is no sleep to tune and no window to lose a race in. Pass
+    `until_terminal=True` when the test's subject is the whole run: it turns "the
+    stream ended early" into a failure that names what actually arrived, instead
+    of an IndexError or an assertion about the wrong event.
+    """
     events = []
     with client.stream("GET", f"/api/runs/{run_id}/events", headers=headers or {}) as response:
         assert response.status_code == 200
@@ -33,6 +41,11 @@ def sse_events(client: TestClient, run_id: str, headers=None) -> list[dict]:
         for line in response.iter_lines():
             if line.startswith("data:"):
                 events.append(json.loads(line[5:].strip()))
+    if until_terminal:
+        types = [e["type"] for e in events]
+        assert types and types[-1] in ("run.done", "run.failed"), (
+            f"the stream for {run_id} ended before a terminal event; got {types}"
+        )
     return events
 
 
@@ -186,8 +199,10 @@ def recorded_run(tmp_path, monkeypatch):
         encoding="utf-8",
     )
     monkeypatch.setattr(replay_module, "replay_path", lambda: path)
-    monkeypatch.setattr(replay_module, "MAX_GAP_MS", 1)
-    monkeypatch.setattr(replay_module, "MIN_GAP_MS", 0)
+    # The replay is paced for a stage; a test wants the same events as fast as
+    # the machine will make them. This is the shipped knob, not a reach into the
+    # module's constants, so the test exercises what an operator would use.
+    monkeypatch.setenv(replay_module.SPEED_ENV_VAR, "1000")
     return path
 
 
@@ -201,7 +216,9 @@ def test_the_demo_replays_a_real_recorded_run_without_a_provider(tmp_path, recor
         created = client.post("/api/demo")
         assert created.status_code == 201
         assert created.json()["replay"] is True
-        events = sse_events(client, created.json()["run_id"])
+        # Reading the stream to EOF IS the wait: the server ends it when the
+        # replay ends. No sleep, and nothing to be slow enough to miss.
+        events = sse_events(client, created.json()["run_id"], until_terminal=True)
     types = [e["type"] for e in events]
     assert types[0] == "run.started" and types[-1] == "run.done"
     assert "verifier.verdict" in types
