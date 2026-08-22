@@ -38,6 +38,17 @@ regular bug:
   tools (`read_file`, `write_file`, `list_files`) scoped to a per-run
   workspace directory. There is no shell/exec tool, and the package contains
   no `subprocess` or `os.system` calls that an agent's output could reach.
+- **Agent files are just files, sandboxed the same way.** An agent is
+  `agents/<slug>.md`; creating, editing, or duplicating one goes through the
+  same path hygiene as the workspace guard — a slug charset check, no `..`
+  traversal, no absolute paths, nothing written outside `agents/`. An
+  agent's persona and standing instructions are XML-escaped into the Worker
+  prompt exactly like any other artifact, so a persona containing prompt-
+  injection-shaped text (a fake closing tag, for instance) renders as inert
+  text, not as instructions. An agent's `tools` list can only be a *subset*
+  of the global tool allow-list — it can narrow what a Worker running as
+  that agent can do, never widen it — and the built-in general-purpose agent
+  cannot be deleted.
 - **Workspace containment.** The workspace guard rejects absolute paths,
   `..` traversal, null bytes, symlink escapes, and directory-prefix
   collisions. It refuses to ever treat the repo root, package directory, or

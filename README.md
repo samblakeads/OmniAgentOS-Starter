@@ -96,6 +96,37 @@ categories — is an OmniRogue Enterprise entitlement. Drop it into `skills/`
 and the count rises automatically; the loader is a directory scan, not a
 hard-coded list.
 
+## Agents
+
+An agent is a persistent, named identity you hand goals to — a file at
+`agents/<slug>.md`: a name, a title, a short persona, a list of skills it's
+allowed to draw on, and the tools it can use. Create one from the dashboard's
+**Agents** section (or drop a file in yourself, same directory-scan loader as
+`skills/`), then hand it a goal from the goal box's **Assign to** picker, or
+by starting the goal text with `@<slug>`. Its Worker prompt becomes that
+persona plus its own skills; its memory is scoped to it, separate from every
+other agent's; and its tools can only be a *narrower* set than the global
+allow-list, never wider. Leave a goal unassigned and behavior is exactly what
+it was before agents existed — the router picks skills the same way it always
+did.
+
+![the Agents roster](docs/screenshot-agents.png)
+
+Five prebuilt agents ship in `agents/`, one per shipped sample skill:
+
+| Slug | Name / Title | Skills |
+|---|---|---|
+| `sales-closer` | Cole, Sales Closer | proposal-generator |
+| `support-rep` | Ava, Support Rep | refund-request-handler |
+| `content-writer` | Max, Content Writer | ad-copy-framework-writer, vsl-script-builder |
+| `researcher` | Nora, Researcher | niche-opportunity-scorer |
+| `ops-assistant` | Sage, Ops Assistant | meeting-agenda-builder, cold-email-sequence-builder |
+
+CLI: `omniagentos agents list`, `omniagentos agents show <slug>`,
+`omniagentos run --agent <slug> "<goal>"`. See `agents/README.md` for the
+file format. The full **OmniRogue Enterprise** roster ships more prebuilt
+agents on top of the full skills library.
+
 ## White-label
 
 Running this under your own brand doesn't require a fork. `OMNIAGENTOS_BRAND_LOGO`

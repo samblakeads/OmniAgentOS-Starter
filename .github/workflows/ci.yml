@@ -48,6 +48,9 @@ jobs:
       - name: lint_skills.py
         run: python scripts/lint_skills.py
 
+      - name: lint_agents.py
+        run: python scripts/lint_agents.py
+
   gitleaks:
     name: gitleaks
     runs-on: ubuntu-latest

@@ -1,0 +1,160 @@
+#!/usr/bin/env python3
+"""Lint every agent file under agents/ against the front-matter schema in
+PLAN.md's Round 6 (AGENTS) section and agents/README.md, and reuse
+lint_skills.py's leak scan (hostnames/emails/IPs/paths/provider-key shapes).
+
+stdlib only — no third-party dependencies. Exits 1 on any failure, prints one
+line per problem found, and a summary at the end.
+
+Usage: python3 scripts/lint_agents.py [agents_dir] [skills_dir]
+"""
+from __future__ import annotations
+
+import re
+import sys
+from importlib import util as _importlib_util
+from pathlib import Path
+
+# Reuse lint_skills.py's leak scan rather than re-deriving the same regexes a
+# third time (redact.py has the first copy, lint_skills.py the second) — both
+# scripts live in scripts/ and are stdlib-only, so this is a sibling import,
+# not a dependency on the omniagentos_starter package.
+_LINT_SKILLS_PATH = Path(__file__).resolve().parent / "lint_skills.py"
+_spec = _importlib_util.spec_from_file_location("lint_skills", _LINT_SKILLS_PATH)
+lint_skills = _importlib_util.module_from_spec(_spec)
+_spec.loader.exec_module(lint_skills)
+
+REQUIRED_FRONT_MATTER_KEYS = (
+    "name",
+    "title",
+    "persona",
+    "skills",
+    "tools",
+    "memory_scope",
+    "visibility",
+    "version",
+)
+ALLOWED_TOOLS = {"read_file", "write_file", "list_files"}
+ALLOWED_VISIBILITY = {"public", "private"}
+MAX_BYTES = 1536  # 1.5 KB ceiling per PLAN.md Round 6
+
+
+def discover_skill_slugs(skills_dir: Path) -> set[str]:
+    if not skills_dir.is_dir():
+        return set()
+    return {p.stem for p in skills_dir.rglob("*.md") if p.name.lower() != "readme.md"}
+
+
+def check_front_matter(fm: dict, path: Path, skill_slugs: set[str]) -> list[str]:
+    errors = []
+    for key in REQUIRED_FRONT_MATTER_KEYS:
+        if key not in fm or fm[key] in ("", [], None):
+            errors.append(f"{path}: front-matter missing required key '{key}'")
+
+    if "skills" in fm:
+        skills = fm["skills"] if isinstance(fm["skills"], list) else [fm["skills"]]
+        if not skills:
+            errors.append(f"{path}: 'skills' list is empty — an agent needs at least one")
+        for s in skills:
+            if s not in skill_slugs:
+                errors.append(
+                    f"{path}: skill '{s}' does not exist under skills/ — "
+                    f"a referenced skill must exist (load error, never silently ignored)"
+                )
+
+    if "tools" in fm:
+        tools = fm["tools"] if isinstance(fm["tools"], list) else [fm["tools"]]
+        for t in tools:
+            if t not in ALLOWED_TOOLS:
+                errors.append(
+                    f"{path}: tool '{t}' is not on the global allow-list {sorted(ALLOWED_TOOLS)} — "
+                    f"an agent's tools may only narrow it, never widen it"
+                )
+
+    if "visibility" in fm and fm["visibility"] not in ALLOWED_VISIBILITY:
+        errors.append(
+            f"{path}: visibility '{fm.get('visibility')}' must be one of {sorted(ALLOWED_VISIBILITY)}"
+        )
+
+    if "persona" in fm and isinstance(fm["persona"], str):
+        sentence_count = len([s for s in re.split(r"(?<=[.!?])\s+", fm["persona"].strip()) if s])
+        if not (2 <= sentence_count <= 4):
+            errors.append(
+                f"{path}: persona should be 2-4 sentences, found {sentence_count}"
+            )
+
+    return errors
+
+
+def check_body(text: str, path: Path) -> list[str]:
+    errors = []
+    if "## Standing instructions" not in text:
+        errors.append(f"{path}: missing required '## Standing instructions' section")
+    return errors
+
+
+def lint_file(path: Path, skill_slugs: set[str]) -> list[str]:
+    errors = []
+    size = path.stat().st_size
+    if size > MAX_BYTES:
+        errors.append(f"{path}: file is {size} bytes, must be <= {MAX_BYTES} (1.5 KB)")
+
+    text = path.read_text(encoding="utf-8")
+    fm, body, fm_errors = lint_skills.parse_front_matter(text, path)
+    errors.extend(fm_errors)
+    if fm:
+        errors.extend(check_front_matter(fm, path, skill_slugs))
+        errors.extend(check_body(body, path))
+    errors.extend(lint_skills.check_leaks(text, path))
+    return errors
+
+
+def main() -> int:
+    self_test_failures = lint_skills.self_test()
+    if self_test_failures:
+        print("lint_agents: SELF-TEST FAILED (via lint_skills) — the leak scanner itself is broken, refusing to scan:\n", file=sys.stderr)
+        for f in self_test_failures:
+            print(f"  FAIL  {f}", file=sys.stderr)
+        return 1
+
+    repo_root = Path(__file__).resolve().parent.parent
+    agents_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else repo_root / "agents"
+    skills_dir = Path(sys.argv[2]) if len(sys.argv) > 2 else repo_root / "skills"
+
+    if not agents_dir.is_dir():
+        print(f"lint_agents: agents directory not found: {agents_dir}", file=sys.stderr)
+        return 1
+
+    skill_slugs = discover_skill_slugs(skills_dir)
+
+    files = sorted(p for p in agents_dir.glob("*.md") if p.name != "README.md")
+    if not files:
+        print(f"lint_agents: no agent .md files found under {agents_dir}", file=sys.stderr)
+        return 1
+
+    all_errors: list[str] = []
+    slugs: dict[str, Path] = {}
+
+    for f in files:
+        slug = f.stem
+        if slug in slugs:
+            all_errors.append(f"{f}: duplicate slug '{slug}' also used by {slugs[slug]}")
+        else:
+            slugs[slug] = f
+        all_errors.extend(lint_file(f, skill_slugs))
+
+    if all_errors:
+        print(f"lint_agents: {len(all_errors)} problem(s) found in {len(files)} agent(s):\n")
+        for e in all_errors:
+            print(f"  FAIL  {e}")
+        return 1
+
+    print(
+        f"lint_agents: OK — {len(files)} agent(s) checked under {agents_dir}, "
+        f"0 problems, {len(slugs)} distinct slugs"
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -8,7 +8,7 @@ off a screen.
 
 ```dod-goals
 Write 3 Meta feed ad copy variants for a $149 12-week strength program for women over 40 using the PAS framework. Each variant: primary text under 125 characters, one headline under 40 characters, and a labelled P/A/S breakdown. ||| dod: Every variant must contain the exact phrase 'Stronger at 40+'
-Policy: Refunds are available within 30 days of purchase for unused subscriptions. After 30 days, no refunds are issued except for billing errors, which are refunded in full once verified. Goal: A customer emailed asking for a refund on a subscription they bought 38 days ago, no billing error involved. Draft the reply, citing the specific policy clause for the decision.
+Policy: Refunds are available within 30 days of purchase for unused subscriptions. After 30 days, no refunds are issued except for billing errors, which are refunded in full once verified. Goal: A customer emailed asking for a refund on a subscription they bought 38 days ago, no billing error involved. Draft the reply, citing the specific policy clause for the decision. ||| agent: riley-meal-prep-support
 Draft a 5-email onboarding sequence for OmniAgentOS Starter and save each email as a separate file named email-1.md, email-2.md, email-3.md, email-4.md, and email-5.md in the workspace.
 ```
 
@@ -42,6 +42,27 @@ Draft a 5-email onboarding sequence for OmniAgentOS Starter and save each email 
 - [ ] Remember: workspace file links open in a NEW TAB (`target=_blank`) —
       plan to open just one file for goal 3, then switch back; don't click
       all five on a projector.
+
+---
+
+## Beat 0 — Agents (30s: create a named agent, hand it goal 2)
+
+1. Click **Agents** in the nav. Point at the roster cards (Cole/Sales
+   Closer, Ava/Support Rep, Max/Content Writer, Nora/Researcher,
+   Sage/Ops Assistant) — say: "these ship built in; you can also make
+   your own."
+2. Click **Create**. Fill in: name `Riley`, title `Meal-Prep Support`,
+   persona a sentence or two about handling meal-plan subscription
+   support, skill: check **Refund Request Handler**. Save.
+3. The new roster card appears immediately — no reload.
+4. Go to the goal box for Goal 2 (below). Instead of leaving the picker on
+   "Let the router decide," pick **Riley** from the **Assign to** dropdown
+   (or type `@riley-meal-prep-support` at the start of the goal text — both
+   do the same thing).
+
+**What you say:** "I didn't just get an agent that happens to be good at
+this — I built one, gave it a name, and told it which skill to carry. It
+remembers what it learns, separately from every other agent."
 
 ---
 
@@ -92,9 +113,12 @@ single prompt would have shipped."
 
 ---
 
-## Goal 2 — customer-support (shows grounding on real policy text)
+## Goal 2 — customer-support (shows grounding on real policy text, run by the agent from Beat 0)
 
-First paste this policy into the goal box as context, then the ask:
+Before you paste the goal in: from the **Assign to** picker, pick **Riley**
+(the agent you created in Beat 0) — or type `@riley-meal-prep-support` as
+the first line of the goal box, which does the same thing. Then paste this
+policy as context, then the ask:
 
 ```
 Policy: Refunds are available within 30 days of purchase for unused
@@ -106,19 +130,21 @@ Goal: A customer emailed asking for a refund on a subscription they bought
 specific policy clause for the decision.
 ```
 
-**What the audience sees:** deliverable panel types out a reply that
-explicitly cites the 30-day policy clause — not a generic apology. The
-quality-gate checklist shows the "from skill: Refund Request Handler /
-customer-support" attribution line, and its checks are the real reason the
-citation is mandatory: that pack's QUALITY CHECKS require a decision of
-Approved/Denied/Escalate, a cited policy clause on any denial, and a
-correct days-since-purchase calculation — so the audience is watching the
-actual gate, not a narrated one.
+**What the audience sees:** the Worker lane carries Riley's chip, not a
+generic "Worker" label — this run is Riley's, not the router's pick.
+Deliverable panel types out a reply that explicitly cites the 30-day policy
+clause — not a generic apology. The quality-gate checklist shows the "from
+skill: Refund Request Handler / customer-support" attribution line, and its
+checks are the real reason the citation is mandatory: that pack's QUALITY
+CHECKS require a decision of Approved/Denied/Escalate, a cited policy
+clause on any denial, and a correct days-since-purchase calculation — so
+the audience is watching the actual gate, not a narrated one.
 
-**What you say:** "It's not guessing at policy — it's grounded on the exact
-text I gave it, and it has to cite the clause it used. That's the
-difference between an assistant that sounds confident and one that's
-actually checkable."
+**What you say:** "This is Riley's run, not the router's guess — I assigned
+it. It's not guessing at policy either — it's grounded on the exact text I
+gave it, and it has to cite the clause it used. That's the difference
+between an assistant that sounds confident and one that's actually
+checkable."
 
 ---
 
