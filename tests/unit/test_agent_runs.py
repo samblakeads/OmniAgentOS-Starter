@@ -161,6 +161,7 @@ async def test_an_agent_without_write_file_cannot_write_files(settings, tmp_path
                 "skill_id": "refund-request-handler",
                 "instruction": "x",
                 "writes_files": True,
+                "needs_tools": [],
             }
         ],
     }
@@ -182,7 +183,7 @@ async def test_an_agent_with_write_file_still_writes(settings, tmp_path):
     plan = {
         "dod": [{"id": "d1", "criterion": "ok"}],
         "tasks": [
-            {"id": "t1", "title": "w", "skill_id": "general-assistant", "instruction": "x", "writes_files": True}
+            {"id": "t1", "title": "w", "skill_id": "general-assistant", "instruction": "x", "writes_files": True, "needs_tools": []}
         ],
     }
     body = "=== FILE: note.md ===\nhello\n=== END FILE ===\ndone"

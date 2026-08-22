@@ -16,7 +16,7 @@ from fastapi.testclient import TestClient
 from omniagentos_starter.agents import MAX_TEAM_DEPTH, AgentError, AgentStore, load_agents
 from omniagentos_starter.api import create_app
 from omniagentos_starter.config import Settings
-from omniagentos_starter.engine import derive_needed_tools, needed_tools_for_task, parse_needs_tools
+from omniagentos_starter.engine import needed_tools_for_task, parse_needs_tools
 from omniagentos_starter.skills import builtin_pack, load_skills
 from omniagentos_starter.tools import TOOL_NAMES
 
@@ -38,10 +38,10 @@ TWO_TASK_PLAN = {
     "tasks": [
         {"id": "t1", "title": "Score the niche", "skill_id": "niche-opportunity-scorer",
          "instruction": "Research the niche and score the opportunity with a numeric rating.",
-         "member": "vera", "depends_on": []},
+         "member": "vera", "depends_on": [], "needs_tools": []},
         {"id": "t2", "title": "Write the headlines", "skill_id": "ad-copy-framework-writer",
          "instruction": "Write three ad copy headlines using PAS framework with character limits for a Meta feed ad.",
-         "member": "nils", "depends_on": ["t1"]},
+         "member": "nils", "depends_on": ["t1"], "needs_tools": []},
     ],
 }
 
@@ -60,6 +60,7 @@ COLLAPSED_PLAN = {
             ),
             "member": "max",
             "depends_on": [],
+            "needs_tools": [],
         },
         {
             "id": "t2",
@@ -71,6 +72,7 @@ COLLAPSED_PLAN = {
             ),
             "member": "max",
             "depends_on": [],
+            "needs_tools": [],
         },
     ],
 }
@@ -375,6 +377,7 @@ async def test_a_task_matching_no_member_pack_uses_generalist_and_emits_fallback
                 "skill_id": "vsl-script-builder",
                 "instruction": "Explain the Kalman filter to a sceptical cat in iambic pentameter.",
                 "member": "max",
+                "needs_tools": [],
             }
         ],
     }
@@ -407,27 +410,26 @@ async def test_a_task_matching_no_member_pack_uses_generalist_and_emits_fallback
     assert "refund-request-handler" not in sources
 
 
-def test_needed_tools_are_derived_from_instruction_not_just_the_flag():
-    """F9 helper: saving/writing files or a filename implies write_file; bare 'write' does not."""
-    assert "write_file" in derive_needed_tools("save each email as a separate file")
-    assert "write_file" in derive_needed_tools(
-        "Save the reply under workspace/refund.md using write_file."
-    )
-    assert derive_needed_tools(
-        "Write three ad copy headlines using PAS framework with character limits."
+def test_needed_tools_are_explicit_only_and_ignore_instruction_text():
+    """F14: no flags and no needs_tools → empty, even when the text names files."""
+    assert needed_tools_for_task(
+        writes_files=False,
+        needs_tools=(),
+        title="Read inbox",
+        instruction="Read the existing files in workspace/inbox",
     ) == ()
-    reading = derive_needed_tools("read the existing files in the workspace")
-    assert "read_file" in reading and "list_files" in reading
+    assert needed_tools_for_task(
+        writes_files=False,
+        needs_tools=(),
+        instruction="Cite policy.md when drafting the refund reply.",
+    ) == ()
     assert parse_needs_tools(["write_file", "shell", "read_file"]) == ("read_file", "write_file")
     assert needed_tools_for_task(
         writes_files=False,
         needs_tools=("write_file",),
         instruction="Draft the refund reply.",
     ) == ("write_file",)
-    assert needed_tools_for_task(
-        writes_files=False,
-        instruction="save each email as a separate file",
-    ) == ("write_file",)
+    assert needed_tools_for_task(writes_files=True, needs_tools=()) == ("write_file",)
 
 
 def _patch_best_match(library, table):
@@ -474,6 +476,7 @@ async def test_a_member_is_eligible_only_when_they_have_the_needed_tool(settings
                 ),
                 "member": "ava",
                 "writes_files": True,
+                "needs_tools": [],
             }
         ],
     }
@@ -506,6 +509,7 @@ async def test_spread_yields_when_the_other_pack_is_much_weaker(settings, tmp_pa
                 "skill_id": "ad-copy-framework-writer",
                 "instruction": "Write one PAS headline for a Meta feed ad.",
                 "member": "max",
+                "needs_tools": [],
             },
             {
                 "id": "t2",
@@ -513,6 +517,7 @@ async def test_spread_yields_when_the_other_pack_is_much_weaker(settings, tmp_pa
                 "skill_id": "ad-copy-framework-writer",
                 "instruction": "Write a second PAS headline for the same Meta feed ad.",
                 "member": "max",
+                "needs_tools": [],
             },
         ],
     }
@@ -562,6 +567,7 @@ async def test_fallback_is_per_chosen_member_not_anyone_who_cleared(settings, tm
                 ),
                 "member": "ava",
                 "writes_files": True,
+                "needs_tools": [],
             }
         ],
     }
@@ -598,7 +604,7 @@ async def test_fallback_is_per_chosen_member_not_anyone_who_cleared(settings, tm
 
 @pytest.mark.asyncio
 async def test_no_eligible_member_fails_closed_and_does_not_bind(settings, tmp_path):
-    """F8: both specialists lack write_file; a writes_files task must refuse, never bind."""
+    """F8/F13(c): both specialists lack write_file; needs_tools=['write_file'] refuses, never binds."""
     max_agent = {**COPYWRITER, "tools": ["read_file", "list_files"]}
     ava_agent = {**SUPPORT, "tools": ["read_file", "list_files"]}
     plan = {
@@ -610,7 +616,7 @@ async def test_no_eligible_member_fails_closed_and_does_not_bind(settings, tmp_p
                 "skill_id": "refund-request-handler",
                 "instruction": "Draft the refund reply and save it to a file.",
                 "member": "ava",
-                "writes_files": True,
+                "needs_tools": ["write_file"],
             }
         ],
     }
@@ -640,8 +646,8 @@ async def test_no_eligible_member_fails_closed_and_does_not_bind(settings, tmp_p
 
 
 @pytest.mark.asyncio
-async def test_instruction_that_saves_files_is_tools_checked_without_the_flag(settings, tmp_path):
-    """F9: writes_files unset, instruction says save-as-file — Ava cannot win without write_file."""
+async def test_empty_needs_tools_binds_on_pack_score_then_refuses_uncovered_write(settings, tmp_path):
+    """F13(a): needs_tools=[] binds the pack winner; a later write_file fails TEAM_TOOL_REFUSED."""
     max_agent = {**COPYWRITER, "tools": list(TOOL_NAMES)}
     ava_agent = {**SUPPORT, "tools": ["read_file", "list_files"]}
     plan = {
@@ -651,12 +657,16 @@ async def test_instruction_that_saves_files_is_tools_checked_without_the_flag(se
                 "id": "t1",
                 "title": "Refund reply",
                 "skill_id": "refund-request-handler",
-                "instruction": "save each email as a separate file",
+                "instruction": "Draft the refund reply and save it.",
                 "member": "ava",
+                "needs_tools": [],
             }
         ],
     }
-    script = Script(plan=plan)
+    script = Script(
+        plan=plan,
+        worker_text="=== FILE: refund.md ===\nDear customer\n=== END FILE ===\ndone",
+    )
     orch = _orch(settings, script, tmp_path, [max_agent, ava_agent, STUDIO])
     _patch_best_match(
         orch.library,
@@ -670,8 +680,8 @@ async def test_instruction_that_saves_files_is_tools_checked_without_the_flag(se
         },
     )
     run = orch.create(
-        "Draft a refund reply and save each email as a separate file.",
-        1,
+        "Draft the refund reply and save it.",
+        3,
         [],
         agent_id="remy",
     )
@@ -679,8 +689,89 @@ async def test_instruction_that_saves_files_is_tools_checked_without_the_flag(se
 
     delegated = _events(run, "team.delegated")
     assert len(delegated) == 1, delegated
-    assert delegated[0]["member"] == "max", delegated
-    assert "write_file" in delegated[0]["tools"]
+    assert delegated[0]["member"] == "ava", delegated
+    assert run.status == "failed", run.status
+    assert run.error_tag == "TEAM_TOOL_REFUSED", run.error_tag
+    assert run.error_tag != "ROUNDS_EXHAUSTED"
+    assert "t1" in run.error_message
+    assert "ava" in run.error_message
+    assert "write_file" in run.error_message
+    refused = _events(run, "team.tool_refused")
+    assert refused, [e["type"] for e in run.bus.events]
+    assert refused[0]["task_id"] == "t1"
+    assert refused[0]["member"] == "ava"
+    assert refused[0]["tool"] == "write_file"
+    failed = _events(run, "run.failed")
+    assert failed and failed[-1]["error_tag"] == "TEAM_TOOL_REFUSED"
+
+
+@pytest.mark.asyncio
+async def test_planner_task_missing_needs_tools_is_reasked_then_plan_invalid(settings, tmp_path):
+    """F13(b): key absent → one re-ask → PLAN_INVALID naming the task."""
+    plan = {
+        "dod": [{"id": "p1", "criterion": "ok"}],
+        "tasks": [
+            {
+                "id": "t1",
+                "title": "Refund reply",
+                "skill_id": "refund-request-handler",
+                "instruction": "Draft the refund reply and save it.",
+                "member": "ava",
+            }
+        ],
+    }
+    script = Script(plan=plan)
+    orch = _orch(settings, script, tmp_path, [COPYWRITER, SUPPORT, STUDIO])
+    run = orch.create("Draft the refund reply and save it.", 1, [], agent_id="remy")
+    await orch.execute(run)
+
+    assert script.counts.get("planner") == 2, script.counts
+    second = script.prompt_text("planner", 1)
+    assert "missing required" in second
+    assert "needs_tools" in second
+    assert "t1" in second
+    assert run.status == "failed", run.status
+    assert run.error_tag == "PLAN_INVALID", run.error_tag
+    assert "t1" in run.error_message
+    assert _events(run, "team.delegated") == []
+    assert _events(run, "planner.plan") == []
+    failed = _events(run, "run.failed")
+    assert failed and failed[-1]["error_tag"] == "PLAN_INVALID"
+    assert "t1" in failed[-1]["message"]
+
+
+@pytest.mark.asyncio
+async def test_missing_tool_is_the_first_uncovered_needed_tool(settings, tmp_path):
+    """F15: missing_tool is the first needed tool no member covers, not needed[0]."""
+    max_agent = {**COPYWRITER, "tools": ["read_file", "list_files"]}
+    ava_agent = {**SUPPORT, "tools": ["read_file", "list_files"]}
+    plan = {
+        "dod": [{"id": "p1", "criterion": "ok"}],
+        "tasks": [
+            {
+                "id": "t1",
+                "title": "Refund reply",
+                "skill_id": "refund-request-handler",
+                "instruction": "Draft the refund reply and save it.",
+                "member": "ava",
+                "needs_tools": ["read_file", "write_file"],
+            }
+        ],
+    }
+    script = Script(plan=plan)
+    orch = _orch(settings, script, tmp_path, [max_agent, ava_agent, STUDIO])
+    run = orch.create("Draft the refund reply and save it.", 1, [], agent_id="remy")
+    await orch.execute(run)
+
+    assert run.status == "failed", run.status
+    assert run.error_tag == "TEAM_NO_ELIGIBLE_MEMBER", run.error_tag
+    refused = _events(run, "team.no_eligible_member")
+    assert refused, [e["type"] for e in run.bus.events]
+    assert refused[0]["needed_tools"] == ["read_file", "write_file"]
+    assert refused[0]["missing_tool"] == "write_file"
+    assert "write_file" in refused[0]["reason"]
+    assert "t1" in run.error_message
+    assert "write_file" in run.error_message
 
 
 @pytest.mark.asyncio
@@ -695,6 +786,7 @@ async def test_spread_band_applies_at_the_80_percent_boundary(settings, tmp_path
                 "skill_id": "ad-copy-framework-writer",
                 "instruction": "Write one PAS headline for a Meta feed ad.",
                 "member": "max",
+                "needs_tools": [],
             },
             {
                 "id": "t2",
@@ -702,6 +794,7 @@ async def test_spread_band_applies_at_the_80_percent_boundary(settings, tmp_path
                 "skill_id": "ad-copy-framework-writer",
                 "instruction": "Write a second PAS headline for the same Meta feed ad.",
                 "member": "max",
+                "needs_tools": [],
             },
         ],
     }
@@ -744,6 +837,7 @@ async def test_spread_band_excludes_a_below_floor_row_inside_the_ratio(settings,
                 "skill_id": "ad-copy-framework-writer",
                 "instruction": "Write one PAS headline for a Meta feed ad.",
                 "member": "max",
+                "needs_tools": [],
             },
             {
                 "id": "t2",
@@ -751,6 +845,7 @@ async def test_spread_band_excludes_a_below_floor_row_inside_the_ratio(settings,
                 "skill_id": "ad-copy-framework-writer",
                 "instruction": "Write a second PAS headline for the same Meta feed ad.",
                 "member": "max",
+                "needs_tools": [],
             },
         ],
     }
@@ -836,6 +931,7 @@ async def test_a_single_agent_run_is_unchanged_by_per_task_team_routing(settings
                 "skill_id": "general-assistant",
                 "instruction": "do it",
                 "depends_on": [],
+                "needs_tools": [],
             }
         ],
     }
@@ -870,6 +966,7 @@ TWO_TASK_SOLO_PLAN = {
             "skill_id": "refund-request-handler",
             "instruction": "Decide Approved, Denied, or Escalate for the refund request.",
             "depends_on": [],
+            "needs_tools": [],
         },
         {
             "id": "t2",
@@ -877,6 +974,7 @@ TWO_TASK_SOLO_PLAN = {
             "skill_id": "refund-request-handler",
             "instruction": "Draft the customer-facing refund reply citing the 30-day policy.",
             "depends_on": ["t1"],
+            "needs_tools": [],
         },
     ],
 }
@@ -1048,7 +1146,7 @@ async def test_a_member_cannot_write_files_the_manager_may_not(settings, tmp_pat
     plan = {
         "dod": [{"id": "p1", "criterion": "ok"}],
         "tasks": [{"id": "t1", "title": "w", "skill_id": "ad-copy-framework-writer",
-                   "instruction": "x", "member": "nils"}],
+                   "instruction": "x", "member": "nils", "needs_tools": []}],
     }
     script = Script(plan=plan, worker_text="=== FILE: n.md ===\nhi\n=== END FILE ===\ndone")
     boss = {**DIRECTOR, "name": "Dara", "tools": ["read_file", "list_files"]}
@@ -1062,6 +1160,10 @@ async def test_a_member_cannot_write_files_the_manager_may_not(settings, tmp_pat
     assert not list((settings.workspace_dir / "runs").rglob("n.md"))
     delegated = _events(run, "team.delegated")[0]
     assert "write_file" not in delegated["tools"], delegated
+    assert run.status == "failed", run.status
+    assert run.error_tag == "TEAM_TOOL_REFUSED", run.error_tag
+    refused = _events(run, "team.tool_refused")
+    assert refused and refused[0]["member"] == "nils" and refused[0]["tool"] == "write_file"
 
 
 @pytest.mark.asyncio
@@ -1069,7 +1171,7 @@ async def test_a_member_keeps_a_tool_the_manager_also_has(settings, tmp_path):
     plan = {
         "dod": [{"id": "p1", "criterion": "ok"}],
         "tasks": [{"id": "t1", "title": "w", "skill_id": "ad-copy-framework-writer",
-                   "instruction": "x", "member": "nils", "writes_files": True}],
+                   "instruction": "x", "member": "nils", "writes_files": True, "needs_tools": []}],
     }
     script = Script(plan=plan, worker_text="=== FILE: n.md ===\nhi\n=== END FILE ===\ndone")
     orch = _orch(settings, script, tmp_path, [WRITER, RESEARCHER, DIRECTOR])

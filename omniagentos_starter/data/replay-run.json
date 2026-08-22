@@ -178,7 +178,8 @@
             "title": "Produce the deliverable",
             "skill_id": "ad-copy-framework-writer",
             "depends_on": [],
-            "writes_files": false
+            "writes_files": false,
+            "needs_tools": []
           }
         ]
       }

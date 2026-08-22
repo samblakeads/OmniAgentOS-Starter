@@ -140,7 +140,7 @@ async def test_the_live_write_path_makes_the_same_distinction(settings, tmp_path
     plan = {
         "dod": [{"id": "d1", "criterion": "ok"}],
         "tasks": [
-            {"id": "t1", "title": "w", "skill_id": "general-assistant", "instruction": "x", "writes_files": True}
+            {"id": "t1", "title": "w", "skill_id": "general-assistant", "instruction": "x", "writes_files": True, "needs_tools": []}
         ],
     }
     body = "=== FILE: ../../pwned.md ===\nx\n=== END FILE ===\ndone"

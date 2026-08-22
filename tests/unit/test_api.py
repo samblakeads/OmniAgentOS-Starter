@@ -151,7 +151,7 @@ def test_the_concurrency_cap_answers_429(settings):
 def test_run_files_are_listed_and_readable_but_never_outside_the_workspace(settings):
     plan = {
         "dod": [{"id": "d1", "criterion": "files exist"}],
-        "tasks": [{"id": "t1", "title": "write", "skill_id": "general-assistant", "instruction": "x", "writes_files": True}],
+        "tasks": [{"id": "t1", "title": "write", "skill_id": "general-assistant", "instruction": "x", "writes_files": True, "needs_tools": []}],
     }
     script = Script(plan=plan, worker_text="=== FILE: note.md ===\nhello file\n=== END FILE ===\ndone")
     with build(settings, script) as client:

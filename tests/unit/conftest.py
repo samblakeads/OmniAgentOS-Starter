@@ -102,6 +102,7 @@ class Script:
                     "instruction": "do it",
                     "depends_on": [],
                     "writes_files": False,
+                    "needs_tools": [],
                 }
             ],
         }

@@ -43,6 +43,7 @@ def _plan_all_general(task_count: int = 1) -> dict:
                 "instruction": "do it",
                 "depends_on": [] if i == 1 else [f"t{i - 1}"],
                 "writes_files": False,
+                "needs_tools": [],
             }
             for i in range(1, task_count + 1)
         ],

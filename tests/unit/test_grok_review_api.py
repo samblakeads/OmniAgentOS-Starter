@@ -81,7 +81,7 @@ def test_a_downloaded_workspace_file_is_redacted(settings, tmp_path):
     plan = {
         "dod": [{"id": "d1", "criterion": "ok"}],
         "tasks": [
-            {"id": "t1", "title": "w", "skill_id": "general-assistant", "instruction": "x", "writes_files": True}
+            {"id": "t1", "title": "w", "skill_id": "general-assistant", "instruction": "x", "writes_files": True, "needs_tools": []}
         ],
     }
     body = f"=== FILE: leak.md ===\nAuthorization: Bearer {TEST_KEY}\n=== END FILE ===\ndone"

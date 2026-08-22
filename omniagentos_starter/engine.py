@@ -63,7 +63,12 @@ FILE_BLOCK_RE = re.compile(
 PLANNER_SCHEMA = (
     '{"dod":[{"id":"d1","criterion":"one checkable requirement"}],'
     '"tasks":[{"id":"t1","title":"short title","skill_id":"<one of the skill ids given>",'
-    '"instruction":"what this worker must produce","depends_on":["t0"],"writes_files":false,"needs_tools":[],"skill_reason":"only if you fell back to general-assistant: one sentence on why","member":"only when a TEAM is listed: the id of the member who does this task"}]}'
+    '"instruction":"what this worker must produce","depends_on":["t0"],"writes_files":false,'
+    '"needs_tools":[],'
+    '"skill_reason":"only if you fell back to general-assistant: one sentence on why",'
+    '"member":"only when a TEAM is listed: the id of the member who does this task"}]}'
+    " REQUIRED on every task: needs_tools (use [] if the task needs no tools)."
+    " Omitting the needs_tools key is invalid."
 )
 VERDICT_SCHEMA = (
     '{"verdicts":[{"criterion_id":"<exactly one of the ids listed>","task_id":"<the task responsible>",'
@@ -101,32 +106,6 @@ def json_flag(value: Any) -> bool:
     return bool(value)
 
 
-# Tools-awareness must not depend on the planner flipping writes_files. A task
-# that names a file, says "save", or lists write_file still needs that tool.
-_WRITE_FILE_HINT = re.compile(
-    r"(?is)"
-    r"\bwrite_file\b"
-    r"|save(?:s|d|ing)?\b.{0,80}\bfiles?\b"
-    r"|\bfiles?\b.{0,40}\bsave(?:s|d|ing)?\b"
-    r"|write(?:s|n|ing)?\b.{0,40}\bfiles?\b"
-    r"|\b(?:as|to|into)\s+(?:a\s+)?(?:separate\s+)?files?\b"
-    r"|\bworkspace/"
-    r"|\b[\w./-]+\.(?:md|txt|json|csv|html|py|yml|yaml|pdf)\b"
-)
-_READ_FILE_HINT = re.compile(
-    r"(?is)"
-    r"\bread_file\b"
-    r"|read(?:s|ing)?\b.{0,80}\b(?:existing\s+)?files?\b"
-    r"|open(?:s|ing)?\b.{0,40}\b(?:existing\s+)?files?\b"
-)
-_LIST_FILES_HINT = re.compile(
-    r"(?is)"
-    r"\blist_files\b"
-    r"|list(?:s|ing)?\b.{0,80}\bfiles?\b"
-    r"|\bdirectory listing\b"
-)
-
-
 def parse_needs_tools(value: Any) -> tuple[str, ...]:
     """Keep only allow-listed tool names, in TOOL_NAMES order. Unknown names drop."""
     if value is None or value is False:
@@ -142,20 +121,20 @@ def parse_needs_tools(value: Any) -> tuple[str, ...]:
     return tuple(name for name in TOOL_NAMES if name in seen and name in allowed)
 
 
-def derive_needed_tools(*parts: str) -> tuple[str, ...]:
-    """Infer tools from title/instruction text. Bare 'write a headline' is not a file write."""
-    blob = " ".join(str(part) for part in parts if str(part).strip())
-    if not blob:
-        return ()
-    found: set[str] = set()
-    if _WRITE_FILE_HINT.search(blob):
-        found.add("write_file")
-    if _READ_FILE_HINT.search(blob):
-        found.add("read_file")
-        found.add("list_files")
-    elif _LIST_FILES_HINT.search(blob):
-        found.add("list_files")
-    return tuple(name for name in TOOL_NAMES if name in found)
+def first_task_missing_needs_tools(plan: Any) -> str | None:
+    """Id of the first planner task that omitted the required `needs_tools` key.
+
+    An empty list is a valid explicit answer (no tools). A missing key is not.
+    """
+    if not isinstance(plan, dict):
+        return "t1"
+    for i, raw in enumerate(plan.get("tasks") or []):
+        if not isinstance(raw, dict):
+            continue
+        if "needs_tools" not in raw:
+            tid = str(raw.get("id") or f"t{i + 1}").strip()[:24] or f"t{i + 1}"
+            return tid
+    return None
 
 
 def needed_tools_for_task(
@@ -165,11 +144,14 @@ def needed_tools_for_task(
     title: str = "",
     instruction: str = "",
 ) -> tuple[str, ...]:
-    """Eligibility set: planner needs_tools ∪ writes_files ∪ text-derived tools."""
+    """Eligibility set: planner needs_tools ∪ {write_file} if writes_files.
+
+    Title and instruction are ignored. Tools are explicit-only; there is no
+    free-text guessing of tools from the task wording.
+    """
     found = set(parse_needs_tools(needs_tools))
     if writes_files:
         found.add("write_file")
-    found.update(derive_needed_tools(title, instruction))
     return tuple(name for name in TOOL_NAMES if name in found)
 
 
@@ -351,7 +333,7 @@ class Task:
     depends_on: list[str] = field(default_factory=list)
     writes_files: bool = False
     # Planner-declared tools for this task, already allow-list filtered.
-    # Eligibility unions this with writes_files and tools derived from text.
+    # Eligibility is this union {write_file} if writes_files — explicit only.
     needs_tools: tuple[str, ...] = ()
     # Which team member executes this task. Empty on a run with no manager,
     # where the assigned agent (or nobody) is the worker throughout.
@@ -482,11 +464,38 @@ class TeamRoutingRefused(Exception):
 
     error_tag = "TEAM_NO_ELIGIBLE_MEMBER"
 
-    def __init__(self, task_id: str, needed: tuple[str, ...]):
+    def __init__(self, task_id: str, needed: tuple[str, ...], missing_tool: str = ""):
         self.task_id = task_id
         self.needed = tuple(needed)
-        missing = ", ".join(self.needed) if self.needed else "the required tools"
-        super().__init__(f"task {task_id} cannot be delegated: no member covers {missing}")
+        self.missing_tool = missing_tool or (needed[0] if needed else "")
+        named = self.missing_tool or "the required tools"
+        super().__init__(f"task {task_id} cannot be delegated: no member covers {named}")
+
+
+class TeamToolRefused(Exception):
+    """A team worker called a tool the bound member does not have.
+
+    Distinct from TeamRoutingRefused (this task was already bound). Fail
+    closed at the write-time gate — never drift into ROUNDS_EXHAUSTED.
+    """
+
+    error_tag = "TEAM_TOOL_REFUSED"
+
+    def __init__(self, task_id: str, member: str, tool: str):
+        self.task_id = task_id
+        self.member = member
+        self.tool = tool
+        super().__init__(f"task {task_id} member {member} was refused tool {tool}")
+
+
+class PlanInvalid(Exception):
+    """A planner task omitted required `needs_tools` after one re-ask."""
+
+    error_tag = "PLAN_INVALID"
+
+    def __init__(self, task_id: str):
+        self.task_id = task_id
+        super().__init__(f"task {task_id} is missing required needs_tools")
 
 
 # ----------------------------------------------------------------- engine ---
@@ -774,8 +783,22 @@ class Engine:
             return self._fail(
                 exc.error_tag,
                 str(exc),
-                failures=[{"task_id": exc.task_id, "needed_tools": list(exc.needed)}],
+                failures=[
+                    {
+                        "task_id": exc.task_id,
+                        "needed_tools": list(exc.needed),
+                        "missing_tool": exc.missing_tool,
+                    }
+                ],
             )
+        except TeamToolRefused as exc:
+            return self._fail(
+                exc.error_tag,
+                str(exc),
+                failures=[{"task_id": exc.task_id, "member": exc.member, "tool": exc.tool}],
+            )
+        except PlanInvalid as exc:
+            return self._fail(exc.error_tag, str(exc), failures=[{"task_id": exc.task_id}])
         except asyncio.CancelledError:
             return self._fail("INTERNAL_ERROR", "run cancelled")
         except Exception as exc:  # never a default status
@@ -1015,8 +1038,9 @@ class Engine:
                         "Never invent work the goal did not ask for, and never use a candidate skill just because "
                         f"it was offered. Produce at most {MAX_PLAN_TASKS} tasks. Use depends_on when a task needs "
                         "an earlier task's artifact. Set writes_files true only when the goal asks for files to be "
-                        "saved. Set needs_tools to the allow-listed tools this task requires "
-                        f"({', '.join(TOOL_NAMES)}); default []. Names outside that list are dropped.\n"
+                        "saved. Every task MUST include `needs_tools`: the allow-listed tools this task requires "
+                        f"({', '.join(TOOL_NAMES)}). An empty list is a valid explicit answer meaning the task "
+                        "needs no tools. Omitting the key is invalid. Names outside that list are dropped.\n"
                         f"Then add at most {MAX_PLANNER_ADDED_CRITERIA} further criteria in `dod` that are "
                         "specific to THIS goal (explicit counts, limits, required phrases, formats) and are not "
                         "already covered above.\nTwo hard rules for the criteria you add: (1) every one must be a "
@@ -1033,11 +1057,29 @@ class Engine:
                 ],
             )
         )
-        plan = await self.llm.complete_json(
-            [{"role": "system", "content": system}, {"role": "user", "content": user}],
-            PLANNER_SCHEMA,
-            role="planner",
-        )
+        messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+        plan: dict = {}
+        missing_task: str | None = None
+        for attempt in range(2):
+            plan = await self.llm.complete_json(messages, PLANNER_SCHEMA, role="planner")
+            missing_task = first_task_missing_needs_tools(plan)
+            if missing_task is None:
+                break
+            if attempt == 0:
+                messages = messages + [
+                    {"role": "assistant", "content": json.dumps(plan, default=str)[:2000]},
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Task {missing_task!r} is missing required `needs_tools`. "
+                            "Reply again with ONLY the JSON object matching the schema. "
+                            "Every task MUST include `needs_tools` "
+                            "(an empty list means the task needs no tools)."
+                        ),
+                    },
+                ]
+        if missing_task is not None:
+            raise PlanInvalid(missing_task)
 
         added: list[Criterion] = []
         for i, item in enumerate(plan.get("dod") or [], start=1):
@@ -1193,13 +1235,16 @@ class Engine:
         return [t for t in TOOL_NAMES if t in allowed]
 
     def _task_needed_tools(self, task: Task) -> tuple[str, ...]:
-        """Tools the executor must have: needs_tools ∪ writes_files ∪ text-derived."""
-        return needed_tools_for_task(
-            writes_files=task.writes_files,
-            needs_tools=task.needs_tools,
-            title=task.title,
-            instruction=task.instruction,
-        )
+        """Tools the executor must have: needs_tools ∪ {write_file} if writes_files."""
+        return needed_tools_for_task(writes_files=task.writes_files, needs_tools=task.needs_tools)
+
+    def _first_uncovered_tool(self, needed: tuple[str, ...]) -> str:
+        """The first needed tool that no team member covers, else needed[0]."""
+        members = self.team or ([self.agent] if self.agent is not None else [])
+        for tool in needed:
+            if not any(self._member_covers_tools(member, (tool,)) for member in members):
+                return tool
+        return needed[0] if needed else ""
 
     def _member_covers_tools(self, member: Agent, needed: tuple[str, ...]) -> bool:
         if not needed:
@@ -1239,7 +1284,7 @@ class Engine:
         and only that pack seeds the task's criteria.
 
         A member is eligible only when the task's needed tools (planner
-        `needs_tools` ∪ writes_files ∪ tools derived from the instruction)
+        `needs_tools` ∪ {write_file} if writes_files — explicit only)
         sit inside that member's effective tools. An empty eligible pool is
         a named refusal (TEAM_NO_ELIGIBLE_MEMBER), never a silent bind.
 
@@ -1285,19 +1330,20 @@ class Engine:
             eligible_rows = [r for r in rows if r[4]]
             if not eligible_rows:
                 needed = self._task_needed_tools(task)
-                missing = ", ".join(needed) if needed else "the required tools"
-                reason = f"task {task.id} cannot be delegated: no member covers {missing}"
+                missing_tool = self._first_uncovered_tool(needed)
+                named = missing_tool or "the required tools"
+                reason = f"task {task.id} cannot be delegated: no member covers {named}"
                 self.bus.emit(
                     "team.no_eligible_member",
                     {
                         "task_id": task.id,
                         "error_tag": "TEAM_NO_ELIGIBLE_MEMBER",
                         "needed_tools": list(needed),
-                        "missing_tool": needed[0] if needed else "",
+                        "missing_tool": missing_tool,
                         "reason": reason,
                     },
                 )
-                raise TeamRoutingRefused(task.id, needed)
+                raise TeamRoutingRefused(task.id, needed, missing_tool)
             # Spread candidates are floor-clearing rows only. If nobody
             # cleared, bind an eligible member and fall back after.
             cleared = [r for r in eligible_rows if r[2] is not None and not r[3]]
@@ -1763,7 +1809,7 @@ class Engine:
         task = self.tasks.get(task_id) if task_id else None
         if not self._tool_allowed("write_file", task):
             executor = self._member_for(task) if task is not None else self.agent
-            return self._refuse_write(
+            self._refuse_write(
                 {
                     "error_tag": "TOOL_NOT_PERMITTED",
                     "reason": f"{executor.name if executor else 'this run'} may not write files",
@@ -1771,6 +1817,18 @@ class Engine:
                 },
                 task_id,
             )
+            if self.team:
+                member = ""
+                if task is not None and task.member:
+                    member = task.member
+                elif executor is not None:
+                    member = executor.slug
+                self.bus.emit(
+                    "team.tool_refused",
+                    {"task_id": task_id, "member": member, "tool": "write_file"},
+                )
+                raise TeamToolRefused(task_id, member, "write_file")
+            return None
         if self.run.workspace is None:
             return self._refuse_write(
                 {"error_tag": "WORKSPACE_ESCAPE", "reason": "no workspace", "path": str(rel)[:120]},

@@ -92,7 +92,7 @@ def test_the_files_api_still_serves_a_real_run(settings):
     plan = {
         "dod": [{"id": "d1", "criterion": "files exist"}],
         "tasks": [
-            {"id": "t1", "title": "write", "skill_id": "general-assistant", "instruction": "x", "writes_files": True}
+            {"id": "t1", "title": "write", "skill_id": "general-assistant", "instruction": "x", "writes_files": True, "needs_tools": []}
         ],
     }
     script = Script(plan=plan, worker_text="=== FILE: note.md ===\nhello file\n=== END FILE ===\ndone")

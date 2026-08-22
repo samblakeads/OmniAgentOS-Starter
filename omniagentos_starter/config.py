@@ -74,6 +74,11 @@ ERROR_TAGS = (
     # A delegated task whose needed tools no team member covers. Fail closed:
     # never silently bind an uncovering member.
     "TEAM_NO_ELIGIBLE_MEMBER",
+    # A worker on a team run called a tool the bound member does not have.
+    # Fail closed at the write-time gate — never drift into ROUNDS_EXHAUSTED.
+    "TEAM_TOOL_REFUSED",
+    # A planner task omitted required `needs_tools` (an empty list is valid).
+    "PLAN_INVALID",
     "AGENT_EXISTS",
     "AGENT_BUILTIN",
     "REPLAY_FAILED",

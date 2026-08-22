@@ -103,8 +103,8 @@ async def test_an_unlocalisable_repair_is_a_hard_error(settings):
     plan = {
         "dod": [{"id": "d1", "criterion": "one"}],
         "tasks": [
-            {"id": "t1", "title": "first", "skill_id": "general-assistant", "instruction": "x"},
-            {"id": "t2", "title": "second", "skill_id": "general-assistant", "instruction": "y"},
+            {"id": "t1", "title": "first", "skill_id": "general-assistant", "instruction": "x", "needs_tools": []},
+            {"id": "t2", "title": "second", "skill_id": "general-assistant", "instruction": "y", "needs_tools": []},
         ],
     }
 
@@ -224,7 +224,7 @@ async def test_plan_caps_are_enforced_and_reported(settings):
     plan = {
         "dod": [{"id": f"d{i}", "criterion": f"criterion {i}"} for i in range(12)],
         "tasks": [
-            {"id": f"t{i}", "title": f"task {i}", "skill_id": "general-assistant", "instruction": "x"}
+            {"id": f"t{i}", "title": f"task {i}", "skill_id": "general-assistant", "instruction": "x", "needs_tools": []}
             for i in range(12)
         ],
     }
@@ -249,7 +249,7 @@ async def test_the_llm_call_budget_stops_a_runaway_run(settings, monkeypatch):
 async def test_a_task_is_capped_to_the_skills_that_were_selected(settings):
     plan = {
         "dod": [{"id": "d1", "criterion": "one"}],
-        "tasks": [{"id": "t1", "title": "x", "skill_id": "not-a-real-skill", "instruction": "x"}],
+        "tasks": [{"id": "t1", "title": "x", "skill_id": "not-a-real-skill", "instruction": "x", "needs_tools": []}],
     }
     run, _ = await run_goal(settings, Script(plan=plan), GOAL)
     assert payload_of(run, "planner.plan")["tasks"][0]["skill_id"] == "general-assistant"
@@ -300,7 +300,7 @@ async def test_worker_file_blocks_are_written_through_the_guard(settings):
     plan = {
         "dod": [{"id": "d1", "criterion": "five files exist"}],
         "tasks": [
-            {"id": "t1", "title": "write files", "skill_id": "general-assistant", "instruction": "x", "writes_files": True}
+            {"id": "t1", "title": "write files", "skill_id": "general-assistant", "instruction": "x", "writes_files": True, "needs_tools": []}
         ],
     }
     body = "".join(f"=== FILE: email-{i}.md ===\nBody {i}\n=== END FILE ===\n" for i in range(1, 6))
@@ -316,7 +316,7 @@ async def test_a_worker_escape_attempt_surfaces_workspace_escape_and_writes_noth
     plan = {
         "dod": [{"id": "d1", "criterion": "ok"}],
         "tasks": [
-            {"id": "t1", "title": "write files", "skill_id": "general-assistant", "instruction": "x", "writes_files": True}
+            {"id": "t1", "title": "write files", "skill_id": "general-assistant", "instruction": "x", "writes_files": True, "needs_tools": []}
         ],
     }
     body = "=== FILE: ../../pwned.md ===\nowned\n=== END FILE ===\nDone."
@@ -384,7 +384,7 @@ async def test_a_declined_candidate_skill_leaves_no_criteria_behind(settings, tm
 
     plan = {
         "dod": [],
-        "tasks": [{"id": "t1", "title": "headlines", "skill_id": "ad-copy", "instruction": "x"}],
+        "tasks": [{"id": "t1", "title": "headlines", "skill_id": "ad-copy", "instruction": "x", "needs_tools": []}],
     }
     script = Script(plan=plan)
     orch = make_orchestrator(settings, script)
@@ -452,6 +452,7 @@ async def test_files_a_worker_writes_are_visible_to_the_critic(settings):
                 "skill_id": "general-assistant",
                 "instruction": "x",
                 "writes_files": True,
+                "needs_tools": [],
             }
         ],
     }

@@ -222,7 +222,7 @@ async def test_a_refused_file_write_is_still_visible_to_the_critic(settings):
     plan = {
         "dod": [{"id": "d1", "criterion": "ok"}],
         "tasks": [
-            {"id": "t1", "title": "write", "skill_id": "general-assistant", "instruction": "x", "writes_files": True}
+            {"id": "t1", "title": "write", "skill_id": "general-assistant", "instruction": "x", "writes_files": True, "needs_tools": []}
         ],
     }
     body = (
