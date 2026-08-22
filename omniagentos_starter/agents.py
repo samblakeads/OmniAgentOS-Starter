@@ -264,10 +264,18 @@ class Agent:
             f'<agent id="{_esc_attr(self.slug)}" name="{_esc_attr(self.name)}" '
             f"agent-sha256:{self.sha256}>\n"
             f"{AGENT_PROHIBITION}\n"
-            f"YOU ARE: {_esc(self.name)}"
+            # The standing-role frame. A persona injected raw reads as background
+            # colour; framed as a STANDING ROLE it is what the model is, with the
+            # goal as instructions inside that role rather than instead of it.
+            # The persona text itself is verbatim inside the frame — the oracle
+            # proves an agent was used by finding it in the transcript, so
+            # rewriting it would break the only evidence that the agent ran.
+            f"You are {_esc(self.name)}"
             + (f", {_esc(self.title)}" if self.title else "")
-            + "\n"
-            f"PERSONA: {_esc(self.persona)}\n"
+            + ". "
+            + _esc(self.persona)
+            + " This standing role applies to every run; treat the goal as "
+            "task-specific instructions within it.\n"
             f"SKILLS YOU CARRY: {skills}\n"
             f"STANDING INSTRUCTIONS:\n{_esc(self.body)}\n"
             f"</agent>"

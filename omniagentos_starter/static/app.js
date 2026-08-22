@@ -27,7 +27,7 @@
     calls: 0, tokens: 0, cost: 0, rounds: 0, health: null,
     inflight: false, streamErrors: 0, token: "", replay: false,
     agents: [], editing: null, agentMode: "create", agentsGeneration: 0,
-    delegations: {}, managerName: ""
+    delegations: {}, managerName: "", agentFilter: ""
   };
 
   var MAX_STREAM_ERRORS = 5;
@@ -114,7 +114,7 @@
           "OMNIAGENTOS_BRAND_LOGO is not a dashboard URL — copy the file into assets/ " +
           "and set /assets/<name>; keeping the bundled logo");
       }
-      logo.alt = h.brand.name || "OmniRogue";
+      logo.alt = h.brand.name || "OmniAgentOS Starter";
     }
     var chip = el("chip-provider");
     if (h.configured) {
@@ -124,7 +124,7 @@
       chip.textContent = "✕ provider unavailable — " + (h.error_tag || "PROVIDER_NOT_CONFIGURED");
       chip.className = "chip bad";
     }
-    el("chip-skills").textContent = "🧩 " + (typeof h.skills === "number" ? h.skills : "?") + " skills loaded";
+    el("chip-skills").textContent = "◧ " + (typeof h.skills === "number" ? h.skills : "?") + " skills loaded";
     el("r-provider").textContent = h.provider || "–";
     el("r-model").textContent = h.model || "–";
     var firstRun = el("first-run");
@@ -188,6 +188,49 @@
     });
   }
 
+  /* ------------------------------------------------------------ avatars
+     A deterministic SVG identity per agent, derived from its slug: the same
+     slug always draws the same face, and two agents never collide by accident
+     the way two initials do. No dependency, no network, no image file — it is
+     arithmetic on a string, which is why it works offline on a stage. */
+  function slugHash(slug) {
+    var h = 2166136261;
+    var text = String(slug || "");
+    for (var i = 0; i < text.length; i += 1) {
+      h ^= text.charCodeAt(i);
+      h = (h * 16777619) >>> 0;
+    }
+    return h >>> 0;
+  }
+
+  var AVATAR_HUES = [198, 262, 152, 24, 340, 44, 288, 178];
+
+  function avatarSvg(slug, size) {
+    var h = slugHash(slug);
+    var px = size || 44;
+    var hue = AVATAR_HUES[h % AVATAR_HUES.length];
+    var hue2 = AVATAR_HUES[(h >>> 3) % AVATAR_HUES.length];
+    var rot = h % 360;
+    var shape = (h >>> 5) % 3;
+    var cx = 12 + ((h >>> 7) % 12);
+    var cy = 12 + ((h >>> 11) % 12);
+    var r = 9 + ((h >>> 13) % 7);
+    var body = shape === 0
+      ? '<circle cx="' + cx + '" cy="' + cy + '" r="' + r + '" fill="hsl(' + hue2 + ' 70% 62%)" opacity=".9"/>'
+      : shape === 1
+        ? '<rect x="' + (cx - r) + '" y="' + (cy - r) + '" width="' + (r * 2) + '" height="' + (r * 2) +
+          '" rx="' + Math.round(r / 2) + '" fill="hsl(' + hue2 + ' 70% 62%)" opacity=".9"/>'
+        : '<polygon points="' + cx + ',' + (cy - r) + ' ' + (cx + r) + ',' + (cy + r) + ' ' +
+          (cx - r) + ',' + (cy + r) + '" fill="hsl(' + hue2 + ' 70% 62%)" opacity=".9"/>';
+    return '<svg class="agent-avatar" data-testid="agent-avatar" width="' + px + '" height="' + px +
+      '" viewBox="0 0 36 36" role="img" aria-label="' + esc(slug) + '">' +
+      '<rect width="36" height="36" rx="10" fill="hsl(' + hue + ' 42% 24%)"/>' +
+      '<g transform="rotate(' + rot + " 18 18)" + '">' + body + "</g>" +
+      '<circle cx="' + (30 - (h % 6)) + '" cy="' + (8 + ((h >>> 17) % 6)) +
+      '" r="3" fill="hsl(' + hue + ' 80% 76%)" opacity=".85"/>' +
+      "</svg>";
+  }
+
   /* ------------------------------------------------------------- agents */
   /* Roster fetches are not ordered. Saving an agent fires one while an earlier
      one may still be in flight, and the browser gives no promise about which
@@ -206,6 +249,7 @@
       state.agents = data.agents || [];
       renderAgents();
       fillAgentPicker();
+      renderAgentFilter();
       updateAgentHint();
       return state.agents;
     }).catch(function () {
@@ -219,18 +263,23 @@
   function renderAgents() {
     var host = el("agents-list");
     if (!state.agents.length) {
-      host.innerHTML = '<p class="muted">No agents yet. Create one and hand it a goal.</p>';
+      host.innerHTML = '<p class="muted">No agents yet. An agent is a named worker with a persona, ' +
+        "its own skills and its own memory — press <b>New agent</b> and the roster fills here.</p>";
       return;
     }
     host.innerHTML = state.agents.map(function (a) {
+      // A manager's capability lives with its team, so "the router may choose
+      // from the whole library" is the wrong sentence on a manager's card.
       var skills = (a.skills || []).length
         ? esc((a.skills || []).join(", "))
-        : "no skills declared · the router may choose from the whole library";
+        : (a.team_members || []).length
+          ? "no skills of its own · the work goes to its team"
+          : "no skills declared · the router may choose from the whole library";
       var lessons = typeof a.lessons === "number" ? a.lessons : 0;
       // A manager is shown by WHO it manages, by name. A list of slugs is a
       // database table, not a team.
       var team = (a.team_members || []).length
-        ? '<div class="agent-meta agent-team" data-testid="agent-team">👥 manages ' +
+        ? '<div class="agent-meta agent-team" data-testid="agent-team">◉ manages ' +
           (a.team_members || []).map(function (m) { return esc(m.name || m.id); }).join(", ") +
           "</div>"
         : "";
@@ -253,13 +302,17 @@
           ? '<button type="button" class="link-button" data-testid="agent-delete-disabled" ' +
             'disabled title="the built-in agent ships with the package">built-in · cannot be deleted</button>'
           : '<button type="button" class="link-button" data-agent-delete="' + esc(a.id) + '">delete</button>');
+      // Name bold, title as a muted subtitle beneath it — never the two run
+      // together in one string.
       return '<article class="agent-card' + (a.enabled === false ? " disabled" : "") +
         '" data-testid="agent-card" data-agent="' + esc(a.id) + '">' +
-        "<b>" + esc(a.name) + "</b>" +
-        '<span class="agent-role">' + esc(a.title || "") + "</span>" +
-        '<div class="agent-meta">🧩 ' + skills + "</div>" +
+        '<div class="agent-head">' + avatarSvg(a.id, 44) +
+        '<div class="agent-ident"><b>' + esc(a.name) + "</b>" +
+        '<span class="agent-role">' + esc(a.title || "") + "</span></div>" +
+        '<span class="agent-orb" data-testid="lane-orb" aria-hidden="true"></span></div>' +
+        '<div class="agent-meta">◧ ' + skills + "</div>" +
         team +
-        '<div class="agent-meta">🧠 ' + lessons + " lesson" + (lessons === 1 ? "" : "s") + " learned</div>" +
+        '<div class="agent-meta">◈ ' + lessons + " lesson" + (lessons === 1 ? "" : "s") + " learned</div>" +
         broken +
         '<div class="agent-actions">' + actions + "</div>" +
         "</article>";
@@ -455,6 +508,36 @@
       .catch(function (err) { showError("INTERNAL_ERROR", String(err)); });
   }
 
+  /* Clicking an agent filters what you are looking at to that agent — its runs
+     and the lessons it learned. With a roster of one this is decoration; with a
+     manager and a team it is how delegation becomes browsable. */
+  function filterByAgent(slug) {
+    state.agentFilter = state.agentFilter === slug ? "" : slug;
+    Array.prototype.forEach.call(document.querySelectorAll("[data-agent]"), function (card) {
+      card.classList.toggle("filtered", state.agentFilter === card.getAttribute("data-agent"));
+    });
+    renderAgentFilter();
+  }
+
+  function renderAgentFilter() {
+    var host = el("agent-runs-filter");
+    if (!host) { return; }
+    if (!state.agentFilter) {
+      host.hidden = true;
+      host.textContent = "";
+      return;
+    }
+    var agent = agentById(state.agentFilter);
+    var name = agent ? agent.name : state.agentFilter;
+    var lessons = agent && typeof agent.lessons === "number" ? agent.lessons : 0;
+    host.hidden = false;
+    host.innerHTML = "Showing <b>" + esc(name) + "</b> — " + lessons + " lesson" +
+      (lessons === 1 ? "" : "s") + " learned. " +
+      '<button type="button" class="link-button" id="agent-filter-clear">Show everyone</button>';
+    var clear = el("agent-filter-clear");
+    if (clear) { clear.addEventListener("click", function () { filterByAgent(state.agentFilter); }); }
+  }
+
   function showWorkerAgent(payload) {
     var chip = el("worker-agent");
     if (!chip) { return; }
@@ -465,7 +548,7 @@
       return;
     }
     var label = payload.name || payload.agent_id;
-    chip.textContent = "👤 " + label + (payload.title ? " · " + payload.title : "");
+    chip.textContent = "◉ " + label + (payload.title ? " · " + payload.title : "");
     chip.hidden = false;
     el("r-agent").textContent = label;
   }
@@ -477,10 +560,10 @@
     if (on) {
       state.busySince = new Date();
       busy.hidden = false;
-      el("busy-text").textContent = "working… since " + hhmmss(state.busySince);
+      el("busy-text").textContent = "Working… since " + hhmmss(state.busySince);
       if (state.busyTimer) { clearInterval(state.busyTimer); }
       state.busyTimer = setInterval(function () {
-        el("busy-text").textContent = "working… since " + hhmmss(state.busySince);
+        el("busy-text").textContent = "Working… since " + hhmmss(state.busySince);
       }, 1000);
     } else {
       busy.hidden = true;
@@ -496,7 +579,7 @@
   function laneStatus(lane, text, cls) {
     var node = el("lane-" + lane);
     if (!node) {
-      // A silent return here froze the Workers header on "○ idle" for a whole
+      // A silent return here froze the Workers header on "○ Idle" for a whole
       // live run while every other lane lit up. A lane we cannot find is a bug
       // in this file, and it says so.
       showError("INTERNAL_ERROR", "dashboard lane '" + lane + "' is missing from the page");
@@ -576,7 +659,7 @@
       var files = (t.files && t.files.length) ? " · " + t.files.length + " file(s)" : "";
       var delegated = state.delegations[id];
       var who = delegated
-        ? '<div class="task-member" data-testid="task-member">👤 ' +
+        ? '<div class="task-member" data-testid="task-member">◉ ' +
           esc(delegated.member_name || delegated.member) + "</div>"
         : "";
       return '<div class="task"><div class="task-title">' + mark + " " + esc(t.title || id) + "</div>" +
@@ -619,7 +702,7 @@
       // browser against the origin before the workspace guard ever saw it.
       var href = "/api/runs/" + encodeURIComponent(state.runId) + "/files/" + String(f.path).split("/").map(encodeURIComponent).join("/") + tokenQuery();
       var size = typeof f.bytes === "number" && isFinite(f.bytes) ? f.bytes + " bytes" : "size unknown";
-      return '<li>📄 <a href="' + esc(href) + '" target="_blank" rel="noopener">' + esc(f.path) + "</a> " +
+      return '<li>▤ <a href="' + esc(href) + '" target="_blank" rel="noopener">' + esc(f.path) + "</a> " +
         '<span class="muted">(' + esc(size) + ")</span></li>";
     }).join("");
   }
@@ -642,7 +725,7 @@
     switch (type) {
       case "run.started":
         state.rounds = 0;
-        laneStatus("planner", "● planning", "active");
+        laneStatus("planner", "● Planning", "active");
         el("run-id").textContent = "run " + (p.run_id || state.runId) + (p.replay ? " (replay)" : "");
         break;
 
@@ -666,7 +749,7 @@
         highlightSkills(p.skill_ids || (p.skills || []).map(function (s) { return s.id; }));
         var names = (p.skills || []).map(function (s) { return s.name + " (" + s.category + ")"; });
         var host = el("planner-body");
-        host.innerHTML = '<p>🧩 skills: ' + esc(names.join(", ") || (p.skill_ids || []).join(", ")) + "</p>" +
+        host.innerHTML = '<p>◧ skills: ' + esc(names.join(", ") || (p.skill_ids || []).join(", ")) + "</p>" +
           (host.dataset.plan || "");
         break;
       }
@@ -677,7 +760,7 @@
         state.delegations[p.task_id] = p;
         var chip = el("worker-agent");
         if (chip) {
-          chip.textContent = "👤 " + (p.member_name || p.member) + " · delegated by " +
+          chip.textContent = "◉ " + (p.member_name || p.member) + " · delegated by " +
             (state.managerName || p.manager);
           chip.hidden = false;
         }
@@ -692,7 +775,7 @@
         break;
 
       case "skill.selection_fallback":
-        el("chip-skills").textContent = "🧩 fallback pack: " + (p.skill_id || "general-assistant");
+        el("chip-skills").textContent = "◧ Fallback pack: " + (p.skill_id || "general-assistant");
         break;
 
       case "planner.plan": {
@@ -706,7 +789,7 @@
         var pb = el("planner-body");
         pb.dataset.plan = plan;
         pb.innerHTML = pb.innerHTML + plan;
-        laneStatus("planner", "✓ planned", "pass");
+        laneStatus("planner", "✓ Planned", "pass");
         travel(1);
         break;
       }
@@ -716,8 +799,8 @@
         state.tasks[p.task_id].title = p.title;
         state.tasks[p.task_id].skill_id = p.skill_id;
         state.tasks[p.task_id].status = "running";
-        laneStatus("worker", "● working", "active");
-        laneStatus("deliverable", "● typing", "active");
+        laneStatus("worker", "● Working", "active");
+        laneStatus("deliverable", "● Typing", "active");
         renderTasks();
         break;
 
@@ -737,7 +820,7 @@
           }
         });
         renderTasks();
-        laneStatus("worker", "✓ tasks complete", "pass");
+        laneStatus("worker", "✓ Tasks complete", "pass");
         travel(2);
         break;
       }
@@ -773,7 +856,7 @@
         });
         renderDod();
         renderCards();
-        laneStatus("critic", p.pass ? "✓ all criteria pass" : "✕ " + (p.failures || []).length + " failing", p.pass ? "pass" : "fail");
+        laneStatus("critic", p.pass ? "✓ All criteria pass" : "✕ " + (p.failures || []).length + " failing", p.pass ? "pass" : "fail");
         if (p.pass) { travel(3); }
         break;
       }
@@ -798,7 +881,7 @@
         break;
 
       case "verifier.verdict":
-        laneStatus("verifier", p.verified ? "✓ verified" : "✕ rejected", p.verified ? "pass" : "fail");
+        laneStatus("verifier", p.verified ? "✓ Verified" : "✕ Rejected", p.verified ? "pass" : "fail");
         if (p.verified) { travel(4); }
         break;
 
@@ -828,7 +911,7 @@
         // A terminal event is not a signature. Only `verified === true` — the
         // same strict predicate the engine uses — turns this lane green.
         if (p.verified === true) {
-          laneStatus("deliverable", "✓ delivered", "pass");
+          laneStatus("deliverable", "✓ Delivered", "pass");
         } else {
           laneStatus("deliverable", "✕ delivered but NOT verified", "fail");
           showError("INTERNAL_ERROR", "the run finished without a verifier sign-off");
@@ -839,7 +922,7 @@
 
       case "run.failed":
         showError(p.error_tag || "INTERNAL_ERROR", p.message || "the run did not finish");
-        laneStatus("deliverable", "✕ failed", "fail");
+        laneStatus("deliverable", "✕ Failed", "fail");
         state.rounds = num(p.rounds, state.rounds);
         renderReceipt(p);
         setBusy(false);
@@ -1060,6 +1143,9 @@
     if (edit) { openAgentForm(agentById(edit), "edit"); }
     if (dup) { duplicateAgent(dup); }
     if (del) { deleteAgent(del); }
+    if (edit || dup || del) { return; }
+    var card = e.target.closest ? e.target.closest("[data-agent]") : null;
+    if (card) { filterByAgent(card.getAttribute("data-agent")); }
   });
   el("goal").addEventListener("keydown", function (e) {
     if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { startRun(); }

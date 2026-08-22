@@ -10,18 +10,18 @@
 
 <header class="topbar">
   <div class="brand">
-    <img id="brand-logo" alt="OmniRogue" src="/assets/omnirogue-logo.png" />
+    <img id="brand-logo" alt="OmniAgentOS Starter" src="/assets/omnirogue-logo.png" />
     <div class="brand-text">
       <h1>OmniAgentOS Starter</h1>
-      <p class="tagline">Hand it a goal. A team of agents plans, executes, critiques, verifies — and keeps going until it's done.</p>
+      <p class="tagline">Hand it a goal — a team of agents plans, builds, critiques, verifies.</p>
     </div>
   </div>
   <nav class="topnav" aria-label="sections">
     <a id="nav-agents" data-testid="nav-agents" class="nav-link" href="#agents">Agents</a>
   </nav>
   <div class="health" id="health-strip">
-    <span class="chip" id="chip-provider">◌ checking provider…</span>
-    <span class="chip" id="chip-skills">◌ skills</span>
+    <span class="chip" id="chip-provider">◌ Checking provider…</span>
+    <span class="chip" id="chip-skills">◌ Skills</span>
   </div>
 </header>
 
@@ -35,7 +35,7 @@
 </div>
 
 <section id="first-run" class="panel first-run" hidden>
-  <h2>◌ No provider key found</h2>
+  <h2>No provider key found</h2>
   <p>
     OmniAgentOS Starter runs on your machine with your key. Set one of these environment
     variables and restart:
@@ -72,42 +72,42 @@
            is exactly when a provider hiccup needs it. -->
       <button id="demo-button" data-testid="watch-demo" class="secondary" type="button">Replay demo</button>
       <button id="retry-button" class="secondary" type="button" hidden>Retry this goal</button>
-      <span id="busy" data-testid="run-busy" class="busy" hidden><span class="spinner" aria-hidden="true"></span><span id="busy-text">working…</span></span>
+      <span id="busy" data-testid="run-busy" class="busy" hidden><span class="spinner" aria-hidden="true"></span><span id="busy-text">Working…</span></span>
       <span id="run-id" class="muted mono"></span>
     </div>
   </section>
 
   <section class="line" aria-label="production line">
     <article class="lane" id="lane-planner" data-lane="planner">
-      <header><span class="lane-icon" aria-hidden="true">◇</span><h2>Planner</h2><span class="lane-status" data-status>○ idle</span></header>
-      <div class="lane-body" id="planner-body"><p class="muted">Waiting for a goal.</p></div>
+      <header><span class="lane-icon" aria-hidden="true">◇</span><h2>Planner</h2><span class="lane-status" data-status>○ Idle</span></header>
+      <div class="lane-body" id="planner-body"><p class="muted">The plan appears here: tasks, and the Definition of Done each one is held to.</p></div>
     </article>
-    <div class="arrow" aria-hidden="true">→<span class="token" id="token-1"></span></div>
+    <div class="arrow" aria-hidden="true">➜<span class="token" id="token-1"></span></div>
 
     <!-- id must match the token laneStatus() is called with ("worker"): the
          mismatch froze this header on "idle" for an entire live run. -->
     <article class="lane" id="lane-worker" data-lane="worker">
-      <header><span class="lane-icon" aria-hidden="true">▤</span><h2>Workers</h2><span class="lane-status" data-status>○ idle</span></header>
+      <header><span class="lane-icon" aria-hidden="true">▤</span><h2>Workers</h2><span class="lane-status" data-status>○ Idle</span></header>
       <!-- Who is doing the work, on the lane that is doing it. -->
       <div class="agent-chip" id="worker-agent" data-testid="worker-agent" hidden></div>
-      <div class="lane-body" id="workers-body"><p class="muted">No tasks yet.</p></div>
+      <div class="lane-body" id="workers-body"><p class="muted">Each task appears here as a worker picks it up, with who is doing it.</p></div>
     </article>
-    <div class="arrow" aria-hidden="true">→<span class="token" id="token-2"></span></div>
+    <div class="arrow" aria-hidden="true">➜<span class="token" id="token-2"></span></div>
 
     <article class="lane" id="lane-critic" data-lane="critic">
-      <header><span class="lane-icon" aria-hidden="true">⚖</span><h2>Critic</h2><span class="lane-status" data-status>○ idle</span></header>
-      <div class="lane-body" id="critic-body"><p class="muted">Nothing to check yet.</p></div>
+      <header><span class="lane-icon" aria-hidden="true">⚖</span><h2>Critic</h2><span class="lane-status" data-status>○ Idle</span></header>
+      <div class="lane-body" id="critic-body"><p class="muted">Every criterion is checked here once the workers have produced something.</p></div>
     </article>
-    <div class="arrow" aria-hidden="true">→<span class="token" id="token-3"></span></div>
+    <div class="arrow" aria-hidden="true">➜<span class="token" id="token-3"></span></div>
 
     <article class="lane" id="lane-verifier" data-lane="verifier">
-      <header><span class="lane-icon" aria-hidden="true">✓</span><h2>Verifier</h2><span class="lane-status" data-status>○ idle</span></header>
-      <div class="lane-body" id="verifier-body"><p class="muted">Awaiting a clean deliverable.</p></div>
+      <header><span class="lane-icon" aria-hidden="true">✓</span><h2>Verifier</h2><span class="lane-status" data-status>○ Idle</span></header>
+      <div class="lane-body" id="verifier-body"><p class="muted">An independent pass signs the deliverable off here — or sends it back.</p></div>
     </article>
-    <div class="arrow" aria-hidden="true">→<span class="token" id="token-4"></span></div>
+    <div class="arrow" aria-hidden="true">➜<span class="token" id="token-4"></span></div>
 
     <article class="lane lane-wide" id="lane-deliverable" data-lane="deliverable">
-      <header><span class="lane-icon" aria-hidden="true">▣</span><h2>Deliverable</h2><span class="lane-status" data-status>○ idle</span></header>
+      <header><span class="lane-icon" aria-hidden="true">▣</span><h2>Deliverable</h2><span class="lane-status" data-status>○ Idle</span></header>
       <div class="lane-body"><pre id="deliverable" data-testid="deliverable" class="deliverable"></pre></div>
     </article>
   </section>
@@ -116,13 +116,14 @@
 
   <section class="panel agents-panel" id="agents">
     <div class="panel-head">
-      <h2><span aria-hidden="true">👤</span> Agents</h2>
+      <h2><span aria-hidden="true">◉</span> Agents</h2>
       <button id="agent-create" data-testid="agent-create" class="secondary" type="button">New agent</button>
     </div>
     <p class="muted">
       Named workers you keep. Assign a goal to one and it becomes the Worker on the line —
       its persona, its skills, its tools, and its own memory of what it learned last time.
     </p>
+    <p id="agent-runs-filter" data-testid="agent-runs-filter" class="agent-filter muted" hidden></p>
     <div id="agents-list" data-testid="agents-list" class="agents-list">
       <p class="muted">Loading the roster…</p>
     </div>
@@ -163,23 +164,23 @@
 
   <section class="columns">
     <section class="panel">
-      <h2><span aria-hidden="true">☑</span> Quality gate</h2>
-      <ul id="dod-list" class="dod-list"><li class="muted">The Definition of Done appears once the Planner has run.</li></ul>
+      <h2><span aria-hidden="true">⊞</span> Quality gate</h2>
+      <ul id="dod-list" class="dod-list"><li class="muted">The Definition of Done appears once the Planner has run — every criterion here is checked by the Critic and the Verifier.</li></ul>
     </section>
 
     <section class="panel">
-      <h2><span aria-hidden="true">🧠</span> Memory</h2>
-      <div id="memory-body"><p class="muted">Lessons recalled from earlier runs appear here.</p></div>
+      <h2><span aria-hidden="true">◈</span> Memory</h2>
+      <div id="memory-body"><p class="muted">Lessons an agent learned in earlier runs appear here, and are fed to the planner before it starts.</p></div>
     </section>
 
     <section class="panel">
-      <h2><span aria-hidden="true">🧩</span> Agent Skills</h2>
+      <h2><span aria-hidden="true">◧</span> Agent Skills</h2>
       <div id="skills-body"><p class="muted">Loading skill library…</p></div>
     </section>
 
     <section class="panel">
-      <h2><span aria-hidden="true">🗂</span> Workspace</h2>
-      <ul id="file-tree" class="file-tree"><li class="muted">No files written in this run.</li></ul>
+      <h2><span aria-hidden="true">▤</span> Workspace</h2>
+      <ul id="file-tree" class="file-tree"><li class="muted">Files a worker saves appear here, and open in a new tab. Ask a goal to save files and they fill in live.</li></ul>
     </section>
   </section>
 </main>
@@ -188,7 +189,7 @@
   <span class="receipt-item">elapsed <b id="r-elapsed">–</b></span>
   <span class="receipt-item">calls <b id="r-calls">–</b></span>
   <span class="receipt-item">tokens <b id="r-tokens">–</b></span>
-  <span class="receipt-item">est $ <b id="r-cost">–</b></span>
+  <span class="receipt-item">est. cost <b id="r-cost">–</b></span>
   <span class="receipt-item">provider <b id="r-provider">–</b></span>
   <span class="receipt-item">model <b id="r-model">–</b></span>
   <span class="receipt-item">rounds <b id="r-rounds">–</b></span>

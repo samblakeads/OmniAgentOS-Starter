@@ -209,3 +209,122 @@ textarea {
 /* Teams: who a manager manages, and who did each task. */
 .agent-card .agent-team { color: var(--ok); }
 .task-member { color: var(--muted); font-size: 16px; }
+
+/* ============================================================== round 8
+   Design pass — Kimi review (A) items 1-10 and (C) fixes, applied with the
+   selectors and values given. The rule everything obeys: hierarchy is built by
+   scaling UP, never below the 16px floor, because this is read from four metres
+   away and not from a laptop. */
+
+/* (A1) A flat type scale means nothing leads. */
+h1 { font-size: 28px; line-height: 1.25; }
+main h2 { font-size: 20px; letter-spacing: 0.2px; margin-bottom: 10px; }
+.lane > header h2 { font-size: 18px; }
+.critic-card h3 { font-size: 18px; }
+
+/* (A2) Live-ticking digits made the sticky footer shimmy, which reads as a bug. */
+.receipt b { font-variant-numeric: tabular-nums; font-size: 18px; }
+.receipt-item { text-transform: uppercase; letter-spacing: 0.06em; font-size: 16px; }
+
+/* (A3) One 1px ring does not survive a projector. */
+.lane { transition: border-color .2s ease, box-shadow .2s ease, background .2s ease; }
+.lane.active {
+  border-color: var(--accent);
+  background: #182230;
+  box-shadow: 0 0 0 2px var(--accent), 0 0 28px rgba(110,168,254,.25);
+}
+
+/* (A4) The lane status becomes a state pill — still icon + word, never colour alone. */
+.lane-status {
+  padding: 3px 12px; border-radius: 999px;
+  border: 1px solid var(--line); background: var(--panel-2);
+}
+.lane.active .lane-status { color: var(--accent); border-color: var(--accent); }
+.lane.pass .lane-status { background: rgba(63,185,80,.12); border-color: var(--ok); }
+.lane.fail .lane-status { background: rgba(248,81,73,.12); border-color: var(--fail); }
+
+/* (A5) The production line is the star of the demo and was the densest thing here. */
+main { padding: 24px 28px; gap: 24px; }
+.panel { padding: 20px 22px; }
+.line { gap: 10px; }
+.lane { padding: 14px 16px; }
+.arrow { width: 34px; font-size: 24px; }
+
+/* (A6) A 10px dot moving 30px was sub-perceptible on a projector. */
+.token { width: 12px; height: 12px; box-shadow: 0 0 10px 2px rgba(110,168,254,.7); }
+@keyframes travel {
+  from { transform: translateX(-18px) scale(.6); opacity: 0; }
+  20%  { opacity: 1; }
+  to   { transform: translateX(22px) scale(1);   opacity: 0; }
+}
+
+/* (A8) Full-bleed alarm slabs pull the eye exactly when the content matters. */
+.critic-card {
+  background: rgba(248,81,73,.07);
+  border: 1px solid var(--line); border-left: 5px solid var(--fail);
+}
+.critic-card.repaired {
+  background: rgba(63,185,80,.07);
+  border-color: var(--line); border-left-color: var(--ok);
+}
+
+/* (A9) An idle lane and a finished one looked alike from a distance. */
+.lane-body > .muted:only-child,
+#agents-list > .muted:only-child {
+  text-align: center; padding: 18px 8px; opacity: .75;
+}
+
+/* (A10) The whole line exists to produce this; it should look like the destination. */
+.lane-wide { background: var(--panel-2); }
+#deliverable { font-size: 17px; line-height: 1.6; }
+.lane-body::-webkit-scrollbar { width: 8px; }
+.lane-body::-webkit-scrollbar-thumb { background: var(--line); border-radius: 4px; }
+
+/* (C) An alert is not a place for a 2009 text link. */
+#error-banner .link-button {
+  border: 1px solid var(--line); border-radius: 6px; padding: 4px 12px; text-decoration: none;
+}
+/* (C) A full run id dumped monospace noise into the button row. */
+#run-id { max-width: 12ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* (A7) Vestibular safety is table stakes, and live demos get keyboard-driven. */
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) {
+  .spinner, .token.travelling { animation: none; }
+  .lane { transition: none; }
+  .agent-orb { animation: none; }
+}
+
+/* ---------------------------------------------------- avatars, orbs, filter */
+.agent-head { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+.agent-avatar { border-radius: 10px; flex: 0 0 auto; }
+.agent-ident { display: flex; flex-direction: column; min-width: 0; flex: 1 1 auto; }
+/* Name bold, title a muted subtitle beneath it — never run together. */
+.agent-ident b { font-size: 18px; line-height: 1.2; }
+.agent-ident .agent-role { color: var(--muted); font-size: 16px; }
+.agent-card { position: relative; overflow: hidden; }
+/* The avatar underlay: identity you can read across a room, without competing
+   with the text on top of it. */
+.agent-card::before {
+  content: ""; position: absolute; inset: 0; opacity: .05; pointer-events: none;
+  background: radial-gradient(120px 120px at 84% -10%, var(--accent), transparent 70%);
+}
+.agent-card.filtered { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent); }
+.agent-card [data-agent], .agent-card { cursor: pointer; }
+
+/* A living state orb: motion says "this is a system with something running in
+   it", and it stops entirely when the machine asks for less motion. */
+.agent-orb {
+  width: 10px; height: 10px; border-radius: 50%; flex: 0 0 auto;
+  background: var(--muted); box-shadow: 0 0 0 0 rgba(110,168,254,.5);
+}
+.lane.active .agent-orb, .agent-card:not(.disabled) .agent-orb {
+  background: var(--accent); animation: orb 2.4s ease-in-out infinite;
+}
+.agent-card.disabled .agent-orb { background: var(--fail); animation: none; }
+@keyframes orb {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(110,168,254,.45); transform: scale(1); }
+  50%      { box-shadow: 0 0 0 6px rgba(110,168,254,0); transform: scale(1.15); }
+}
+.agent-filter { margin: 0 0 10px; }
+.agent-filter b { color: var(--text); }
