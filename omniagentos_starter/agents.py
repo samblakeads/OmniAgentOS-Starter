@@ -780,6 +780,7 @@ class AgentStore:
             "title": current.title,
             "persona": current.persona,
             "skills": list(current.skills),
+            "team": list(current.team),
             "tools": list(current.tools),
             "memory_scope": current.memory_scope,
             "visibility": current.visibility,
@@ -887,23 +888,21 @@ class AgentStore:
         if not agent.team or roster is None:
             return
         if agent.slug in agent.team:
-            raise AgentError("BAD_REQUEST", "an agent cannot be a member of its own team")
+            raise AgentError("TEAM_SELF", "an agent cannot be a member of its own team")
         missing = [m for m in agent.team if roster.by_id(m) is None]
         if missing:
             raise AgentError(
-                "BAD_REQUEST", f"these team members are not in the roster: {', '.join(sorted(missing))}"
+                "TEAM_MISSING_MEMBER",
+                f"these team members are not in the roster: {', '.join(sorted(missing))}",
             )
-        disabled = [m for m in agent.team if not (roster.by_id(m) or agent).enabled]
-        if disabled:
-            raise AgentError(
-                "BAD_REQUEST", f"these team members are disabled: {', '.join(sorted(disabled))}"
-            )
-        # Walk the chain the new agent would create and refuse a cycle or an
-        # over-deep hierarchy before it reaches the disk.
+        # Walk before the disabled-member check: a member that is itself a
+        # broken manager (disabled because it points at us) is a CYCLE, and
+        # naming it TEAM_DISABLED_MEMBER would hide the shape the operator
+        # actually wrote.
         def walk(slug: str, seen: tuple[str, ...]) -> int:
             if slug in seen:
                 raise AgentError(
-                    "BAD_REQUEST", "that team would create a cycle: " + " → ".join([*seen, slug])
+                    "TEAM_CYCLE", "that team would create a cycle: " + " → ".join([*seen, slug])
                 )
             member = agent if slug == agent.slug else roster.by_id(slug)
             if member is None or not member.team:
@@ -915,6 +914,12 @@ class AgentStore:
             raise AgentError(
                 "BAD_REQUEST",
                 f"that team is {depth} agents deep; the limit is {MAX_TEAM_DEPTH}",
+            )
+        disabled = [m for m in agent.team if not (roster.by_id(m) or agent).enabled]
+        if disabled:
+            raise AgentError(
+                "TEAM_DISABLED_MEMBER",
+                f"these team members are disabled: {', '.join(sorted(disabled))}",
             )
 
     @staticmethod

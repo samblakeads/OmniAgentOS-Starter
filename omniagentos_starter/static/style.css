@@ -328,3 +328,4 @@ main { padding: 24px 28px; gap: 24px; }
 }
 .agent-filter { margin: 0 0 10px; }
 .agent-filter b { color: var(--text); }
+.agent-run-list { margin: 0 0 12px; }

@@ -34,7 +34,7 @@ from .config import (
     skills_dir,
     static_dir,
 )
-from .engine import EventBus, Orchestrator, RunLimit, RunState, UnknownAgent
+from .engine import EventBus, Orchestrator, RunLimit, RunState, TeamUnrunnable, UnknownAgent
 from .llm import LLMClient
 from .redact import WorkspaceEscape, redact, register_secret
 from .replay import ReplayUnavailable, replay_into, replay_metadata
@@ -488,6 +488,11 @@ def create_app(settings: Settings | None = None, orchestrator: Orchestrator | No
                 redact({"error_tag": exc.error_tag, "message": str(exc), "agent_id": exc.slug}),
                 status_code=400,
             )
+        except TeamUnrunnable as exc:
+            return JSONResponse(
+                redact({"error_tag": exc.error_tag, "message": str(exc), "agent_id": exc.slug}),
+                status_code=400,
+            )
         except ValueError as exc:
             return JSONResponse(redact({"error_tag": "BAD_REQUEST", "message": str(exc)}), status_code=400)
         orch.start(run)
@@ -563,7 +568,7 @@ def create_app(settings: Settings | None = None, orchestrator: Orchestrator | No
                     run.bus.close()
 
     @api.get("/runs")
-    async def list_runs() -> JSONResponse:
+    async def list_runs(agent_id: str | None = None) -> JSONResponse:
         live = {r.id: r.summary() for r in orch.runs.values()}
         rows: list[dict] = []
         seen: set[str] = set()
@@ -574,6 +579,9 @@ def create_app(settings: Settings | None = None, orchestrator: Orchestrator | No
         for run_id, summary in live.items():
             if run_id not in seen:
                 rows.insert(0, summary)
+        if agent_id:
+            wanted = safe_agent_slug(agent_id)
+            rows = [r for r in rows if safe_agent_slug(r.get("agent_id") or "") == wanted]
         return JSONResponse(redact({"runs": rows, "items": rows}))
 
     @api.get("/runs/{run_id}")

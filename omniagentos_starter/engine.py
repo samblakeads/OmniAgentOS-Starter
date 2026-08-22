@@ -370,6 +370,20 @@ class UnknownAgent(ValueError):
         )
 
 
+class TeamUnrunnable(ValueError):
+    """A run named a manager whose team is no longer runnable.
+
+    Distinct from UnknownAgent: the manager is in the roster, but a member
+    vanished, disabled, or the team became a cycle between load and start.
+    """
+
+    def __init__(self, slug: str, error_tag: str, detail: str = ""):
+        self.slug = str(slug)
+        self.error_tag = error_tag
+        self.detail = detail
+        super().__init__(detail or f"agent {self.slug!r} cannot run: its team is unusable")
+
+
 # ----------------------------------------------------------------- engine ---
 class Engine:
     """Executes one run. Construct per run; the Orchestrator owns the fleet."""
@@ -547,6 +561,29 @@ class Engine:
     # ------------------------------------------------------------------- run
     async def execute(self) -> RunState:
         run = self.run
+        # A member file deleted between roster load and this start must not
+        # become a hang, a 500, or the manager silently doing the work.
+        if self.agent is not None and self.agent.team and self.roster is not None:
+            missing = [
+                slug
+                for slug in self.agent.team
+                if self.roster.by_id(slug) is None
+            ]
+            if missing:
+                return self._fail(
+                    "TEAM_MISSING_MEMBER",
+                    "team members are not in the roster: " + ", ".join(sorted(missing)),
+                )
+            disabled = [
+                slug
+                for slug in self.agent.team
+                if self.roster is not None and not (self.roster.by_id(slug) or self.agent).enabled
+            ]
+            if disabled:
+                return self._fail(
+                    "TEAM_DISABLED_MEMBER",
+                    "team members are disabled: " + ", ".join(sorted(disabled)),
+                )
         run.status = "running"
         run.started_ts = time.time()
         self.memory.create_run(run.id, run.goal, agent_id=run.agent_id)
@@ -851,6 +888,7 @@ class Engine:
                         "depends_on": t.depends_on,
                         "writes_files": t.writes_files,
                         "skill_reason": self.skill_reasons.get(t.id, ""),
+                        "member": t.member,
                     }
                     for t in (self.tasks[i] for i in self.order)
                 ],
@@ -1323,7 +1361,16 @@ class Engine:
                 },
                 task_id,
             )
-        self.bus.emit("tool.write", {"tool": "write_file", "task_id": task_id, **result})
+        executor = self._member_for(task) if task is not None else self.agent
+        self.bus.emit(
+            "tool.write",
+            {
+                "tool": "write_file",
+                "task_id": task_id,
+                "agent_id": executor.slug if executor else (self.run.agent_id or ""),
+                **result,
+            },
+        )
         return result
 
     def _refuse_write(self, error: dict, task_id: str) -> None:
@@ -1766,6 +1813,7 @@ class Orchestrator:
         """Scan the agent roster. Call AFTER load_library — an agent's `skills:`
         list is validated against the library, and a roster loaded first would
         disable every agent for naming packs that had not been read yet."""
+        self._roster_root = Path(root)
         self.roster = load_agents(root, library=self.library)
         return self.roster
 
@@ -1782,12 +1830,39 @@ class Orchestrator:
         agent = self.roster.by_id(wanted)
         if agent is None:
             raise UnknownAgent(wanted)
+        self._require_runnable_team(agent)
         if not agent.enabled:
             raise UnknownAgent(
                 wanted,
                 f"agent {wanted!r} is disabled: " + "; ".join(agent.errors or ["failed integrity"]),
             )
         return agent
+
+    def _require_runnable_team(self, agent: Agent) -> None:
+        """Refuse a manager whose team went bad after the roster was last written.
+
+        The write path already rejects these shapes; this is the same check at
+        run start, so a member file deleted between load and POST /api/runs
+        is a named 400 rather than a decorative team the manager executes.
+        """
+        if not agent.team:
+            return
+        if agent.slug in agent.team:
+            raise TeamUnrunnable(agent.slug, "TEAM_SELF", "an agent cannot be a member of its own team")
+        missing = [m for m in agent.team if self.roster.by_id(m) is None]
+        if missing:
+            raise TeamUnrunnable(
+                agent.slug,
+                "TEAM_MISSING_MEMBER",
+                "team members are not in the roster: " + ", ".join(sorted(missing)),
+            )
+        disabled = [m for m in agent.team if not (self.roster.by_id(m) or agent).enabled]
+        if disabled:
+            raise TeamUnrunnable(
+                agent.slug,
+                "TEAM_DISABLED_MEMBER",
+                "team members are disabled: " + ", ".join(sorted(disabled)),
+            )
 
     def split_agent_prefix(self, goal: str) -> tuple[str, str]:
         """`@slug do the thing` assigns the run to `slug`, same as the picker.
@@ -1855,6 +1930,31 @@ class Orchestrator:
         return run
 
     async def execute(self, run: RunState) -> RunState:
+        # Re-read the roster so a member file deleted after create() but
+        # before the engine starts cannot be executed as a decorative team.
+        # Reload from the same root load_roster() was given — settings.agents_dir
+        # is the HTTP default, but tests (and any caller) may have pointed the
+        # orchestrator at a different directory.
+        if run.agent_id and getattr(self, "_roster_root", None) is not None:
+            self.load_roster(self._roster_root)
+            try:
+                run.agent = self.resolve_agent(run.agent_id)
+            except (UnknownAgent, TeamUnrunnable) as exc:
+                run.status = "failed"
+                run.error_tag = getattr(exc, "error_tag", "UNKNOWN_AGENT")
+                run.error_message = str(exc)
+                if run.bus:
+                    run.bus.emit(
+                        "run.failed",
+                        {
+                            "run_id": run.id,
+                            "error_tag": run.error_tag,
+                            "message": run.error_message,
+                            "agent_id": run.agent_id,
+                        },
+                    )
+                    run.bus.close()
+                return run
         engine = Engine(
             run,
             self.settings.provider,

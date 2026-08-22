@@ -27,7 +27,8 @@
     calls: 0, tokens: 0, cost: 0, rounds: 0, health: null,
     inflight: false, streamErrors: 0, token: "", replay: false,
     agents: [], editing: null, agentMode: "create", agentsGeneration: 0,
-    delegations: {}, managerName: "", agentFilter: ""
+    delegations: {}, managerName: "", agentFilter: "",
+    runs: [], lessons: [], currentAgentId: ""
   };
 
   var MAX_STREAM_ERRORS = 5;
@@ -517,6 +518,81 @@
       card.classList.toggle("filtered", state.agentFilter === card.getAttribute("data-agent"));
     });
     renderAgentFilter();
+    renderScopedPanels();
+    if (state.agentFilter) {
+      apiFetch("/api/runs?agent_id=" + encodeURIComponent(state.agentFilter)).then(function (r) {
+        return r.ok ? r.json() : { runs: [] };
+      }).then(function (data) {
+        var scoped = data.runs || data.items || [];
+        state.runs = state.runs.filter(function (row) {
+          return (row.agent_id || "") !== state.agentFilter;
+        }).concat(scoped);
+        renderScopedPanels();
+      }).catch(function () { /* keep the client-side filter */ });
+    }
+  }
+
+  function loadHistory() {
+    return Promise.all([
+      apiFetch("/api/runs").then(function (r) { return r.ok ? r.json() : { runs: [] }; }),
+      apiFetch("/api/lessons").then(function (r) { return r.ok ? r.json() : { lessons: [] }; })
+    ]).then(function (pair) {
+      state.runs = pair[0].runs || pair[0].items || [];
+      state.lessons = pair[1].lessons || pair[1].items || [];
+      renderScopedPanels();
+    }).catch(function () { /* keep whatever we last had */ });
+  }
+
+  function matchingRuns() {
+    if (!state.agentFilter) { return state.runs; }
+    return state.runs.filter(function (r) { return (r.agent_id || "") === state.agentFilter; });
+  }
+
+  function matchingLessons() {
+    if (!state.agentFilter) { return state.lessons; }
+    return state.lessons.filter(function (l) { return (l.agent_id || "") === state.agentFilter; });
+  }
+
+  function renderScopedPanels() {
+    renderAgentFilter();
+    renderLessonHistory();
+    renderRunHistory();
+    renderFiles();
+  }
+
+  function renderLessonHistory() {
+    var body = el("memory-body");
+    if (!body) { return; }
+    if (!state.agentFilter && state.inflight) { return; }
+    var items = matchingLessons();
+    if (!items.length) {
+      body.innerHTML = '<p class="muted">' + (state.agentFilter
+        ? "No lessons learned by this agent yet."
+        : "Lessons an agent learned in earlier runs appear here, and are fed to the planner before it starts.") + "</p>";
+      return;
+    }
+    body.innerHTML = items.map(function (l) {
+      return '<div class="lesson">' + esc(l.text) +
+        '<div class="lesson-meta">learned in run #' + esc(l.run_id) +
+        (l.agent_id ? " · @" + esc(l.agent_id) : "") + "</div></div>";
+    }).join("");
+  }
+
+  function renderRunHistory() {
+    var host = el("agent-run-list");
+    if (!host) { return; }
+    if (!state.agentFilter) { host.hidden = true; host.innerHTML = ""; return; }
+    var items = matchingRuns();
+    host.hidden = false;
+    if (!items.length) {
+      host.innerHTML = '<li class="muted">No runs for this agent yet.</li>';
+      return;
+    }
+    host.innerHTML = items.map(function (r) {
+      var id = r.run_id || r.id;
+      return "<li><a href=\"/?run_id=" + encodeURIComponent(id) + "\">" + esc(id) + "</a> " +
+        '<span class="muted">' + esc((r.goal || "").slice(0, 80)) + "</span></li>";
+    }).join("");
   }
 
   function renderAgentFilter() {
@@ -529,9 +605,11 @@
     }
     var agent = agentById(state.agentFilter);
     var name = agent ? agent.name : state.agentFilter;
-    var lessons = agent && typeof agent.lessons === "number" ? agent.lessons : 0;
+    var runs = matchingRuns().length;
+    var lessons = matchingLessons().length;
     host.hidden = false;
-    host.innerHTML = "Showing <b>" + esc(name) + "</b> — " + lessons + " lesson" +
+    host.innerHTML = "Showing <b>" + esc(name) + "</b> — " + runs + " run" +
+      (runs === 1 ? "" : "s") + ", " + lessons + " lesson" +
       (lessons === 1 ? "" : "s") + " learned. " +
       '<button type="button" class="link-button" id="agent-filter-clear">Show everyone</button>';
     var clear = el("agent-filter-clear");
@@ -633,6 +711,30 @@
   }
 
   /* ------------------------------------------------------------ rendering */
+  function rememberTask(id, fields) {
+    if (!id) { return null; }
+    var t = state.tasks[id] || (state.tasks[id] = { id: id });
+    Object.keys(fields || {}).forEach(function (k) {
+      if (fields[k] !== undefined && fields[k] !== "") { t[k] = fields[k]; }
+    });
+    return t;
+  }
+
+  function taskMemberHtml(task) {
+    if (!task || !(task.member || task.member_name)) { return ""; }
+    return '<div class="task-member" data-testid="task-member">◉ ' +
+      esc(task.member_name || task.member) + "</div>";
+  }
+
+  function taskForSource(source) {
+    var ids = Object.keys(state.tasks);
+    for (var i = 0; i < ids.length; i += 1) {
+      var t = state.tasks[ids[i]];
+      if (t.skill_id === source && (t.member || t.member_name)) { return t; }
+    }
+    return null;
+  }
+
   function renderDod() {
     var list = el("dod-list");
     if (!state.dod.length) { return; }
@@ -644,7 +746,8 @@
       var source = c.source === "planner" ? "from planner"
         : c.source === "operator" ? "from you"
           : "from skill: " + esc(skill ? skill.name : c.source);
-      return "<li>" + mark + esc(c.criterion) +
+      var who = taskMemberHtml(taskForSource(c.source));
+      return "<li>" + mark + esc(c.criterion) + who +
         '<span class="dod-source">' + source + " · " + esc(c.id) + "</span></li>";
     }).join("");
   }
@@ -657,13 +760,8 @@
       var t = state.tasks[id];
       var mark = t.status === "done" ? "✓" : t.status === "running" ? "●" : "○";
       var files = (t.files && t.files.length) ? " · " + t.files.length + " file(s)" : "";
-      var delegated = state.delegations[id];
-      var who = delegated
-        ? '<div class="task-member" data-testid="task-member">◉ ' +
-          esc(delegated.member_name || delegated.member) + "</div>"
-        : "";
       return '<div class="task"><div class="task-title">' + mark + " " + esc(t.title || id) + "</div>" +
-        who +
+        taskMemberHtml(t) +
         '<div class="task-skill">' + esc(t.skill_id || "") + " · " + esc(t.status) + files + "</div></div>";
     }).join("");
   }
@@ -692,11 +790,22 @@
 
   function renderFiles() {
     var tree = el("file-tree");
-    if (!state.files.length) {
-      tree.innerHTML = '<li class="muted">No files written in this run.</li>';
+    var files = state.files || [];
+    if (state.agentFilter) {
+      files = files.filter(function (f) {
+        return !f.agent_id || f.agent_id === state.agentFilter;
+      });
+      if (state.currentAgentId && state.currentAgentId !== state.agentFilter) {
+        files = [];
+      }
+    }
+    if (!files.length) {
+      tree.innerHTML = '<li class="muted">' + (state.agentFilter
+        ? "No files from this agent's runs in view."
+        : "No files written in this run.") + "</li>";
       return;
     }
-    tree.innerHTML = state.files.map(function (f) {
+    tree.innerHTML = files.map(function (f) {
       // Every segment is encoded: an unencoded name with a space, '#' or '?' in
       // it broke the "click the file" beat, and '..' would be resolved by the
       // browser against the origin before the workspace guard ever saw it.
@@ -755,9 +864,18 @@
       }
 
       case "team.delegated": {
-        // Delegation is the whole point of a manager, so it is visible on the
-        // lane doing the work rather than only in the event log.
-        state.delegations[p.task_id] = p;
+        // Join onto the task itself. team.delegated fires before planner.plan,
+        // so a side-map keyed later by worker.started is how the per-task
+        // marker never rendered — the chip still updated because it does not
+        // join.
+        var tid = p.task_id || ev.task_id;
+        rememberTask(tid, {
+          member: p.member,
+          member_name: p.member_name || p.member,
+          delegated_by: p.manager
+        });
+        if (state.tasks[tid]) { state.tasks[tid].member = p.member; }
+        state.delegations[tid] = p;
         var chip = el("worker-agent");
         if (chip) {
           chip.textContent = "◉ " + (p.member_name || p.member) + " · delegated by " +
@@ -765,11 +883,13 @@
           chip.hidden = false;
         }
         renderTasks();
+        renderDod();
         break;
       }
 
       case "agent.assigned":
         state.managerName = p.name || p.agent_id;
+        state.currentAgentId = p.agent_id || "";
         showWorkerAgent(p);
         el("run-id").textContent = (el("run-id").textContent || "") + " · @" + (p.agent_id || "");
         break;
@@ -780,10 +900,21 @@
 
       case "planner.plan": {
         state.dod = (p.dod || []).map(function (c) { return { id: c.id, criterion: c.criterion, source: c.source, state: "pending" }; });
+        (p.tasks || []).forEach(function (t) {
+          rememberTask(t.id || t.task_id, {
+            title: t.title,
+            skill_id: t.skill_id,
+            status: "pending",
+            member: t.member,
+            member_name: t.member_name
+          });
+        });
         renderDod();
         var plan = "<p><b>" + (p.tasks || []).length + " tasks · " + (p.dod || []).length + " criteria</b></p>" +
           (p.tasks || []).map(function (t) {
+            var task = state.tasks[t.id || t.task_id] || t;
             return '<div class="task"><div class="task-title">' + esc(t.title) + "</div>" +
+              taskMemberHtml(task) +
               '<div class="task-skill">' + esc(t.id) + " · " + esc(t.skill_id) + "</div></div>";
           }).join("");
         var pb = el("planner-body");
@@ -791,14 +922,18 @@
         pb.innerHTML = pb.innerHTML + plan;
         laneStatus("planner", "✓ Planned", "pass");
         travel(1);
+        renderTasks();
         break;
       }
 
       case "worker.started":
-        state.tasks[p.task_id] = state.tasks[p.task_id] || {};
-        state.tasks[p.task_id].title = p.title;
-        state.tasks[p.task_id].skill_id = p.skill_id;
-        state.tasks[p.task_id].status = "running";
+        rememberTask(p.task_id || ev.task_id, {
+          title: p.title,
+          skill_id: p.skill_id,
+          status: "running",
+          member: p.member,
+          member_name: p.member_name
+        });
         laneStatus("worker", "● Working", "active");
         laneStatus("deliverable", "● Typing", "active");
         renderTasks();
@@ -826,7 +961,10 @@
       }
 
       case "tool.write":
-        state.files.push({ path: p.path, bytes: p.bytes });
+        state.files.push({
+          path: p.path, bytes: p.bytes,
+          agent_id: p.agent_id || p.member || state.currentAgentId
+        });
         renderFiles();
         break;
 
@@ -918,6 +1056,7 @@
         }
         setBusy(false);
         el("retry-button").hidden = true;
+        loadHistory();
         break;
 
       case "run.failed":
@@ -1034,7 +1173,7 @@
     state.files = []; state.calls = 0; state.tokens = 0; state.cost = 0; state.rounds = 0;
     state.goal = goal;
     state.streamErrors = 0;
-    state.delegations = {}; state.managerName = "";
+    state.delegations = {}; state.managerName = ""; state.currentAgentId = "";
     el("deliverable").textContent = "";
     el("critic-cards").innerHTML = "";
     el("error-banner").hidden = true;
@@ -1155,11 +1294,15 @@
 
   bootstrapToken().then(function () {
     // Skills first: the agent form's multi-select is built from the library.
-    return loadSkills().then(loadAgents).then(loadHealth);
+    return loadSkills().then(loadAgents).then(loadHealth).then(loadHistory);
   }).then(function () {
     var params = new URLSearchParams(window.location.search);
     if (params.get("demo") === "1") { startDemo(); }
-    var replay = params.get("replay");
-    if (replay) { state.replay = true; resetRun(""); attach(replay); }
+    var existing = params.get("run_id") || params.get("replay");
+    if (existing) {
+      state.replay = Boolean(params.get("replay"));
+      resetRun("");
+      attach(existing);
+    }
   });
 })();

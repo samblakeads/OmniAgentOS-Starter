@@ -361,6 +361,109 @@ def test_the_api_refuses_a_cycle(client):
     assert "cycle" in resp.json()["message"]
 
 
+# Round-8b: write-path team refusals must be named on BOTH verbs, and must
+# not leave a file behind. duplicate() already does this; create/update must.
+TEAM_WRITE_CASES = (
+    "self",
+    "cycle",
+    "missing",
+    "disabled",
+)
+
+
+def _seed_writer(client):
+    assert client.post("/api/agents", json=WRITER).status_code == 201, "fixture writer must exist"
+
+
+def _team_write_payload(client, case: str, verb: str) -> tuple[str, dict, str]:
+    """(url-or-empty, json body, expected error_tag) for one of the four cases."""
+    if case == "self":
+        if verb == "POST":
+            return "/api/agents", {"name": "Selfie", "team": ["selfie"]}, "TEAM_SELF"
+        _seed_writer(client)
+        return "/api/agents/nils", {"team": ["nils"]}, "TEAM_SELF"
+    if case == "missing":
+        if verb == "POST":
+            return "/api/agents", {"name": "Ghost Boss", "team": ["nobody"]}, "TEAM_MISSING_MEMBER"
+        _seed_writer(client)
+        return "/api/agents/nils", {"team": ["nobody"]}, "TEAM_MISSING_MEMBER"
+    if case == "disabled":
+        client.roster_root.mkdir(parents=True, exist_ok=True)
+        (client.roster_root / "broken.md").write_text(
+            "---\nname: Broken\nskills: [no-such-pack]\n---\nb\n", encoding="utf-8"
+        )
+        if verb == "POST":
+            return "/api/agents", {"name": "Boss", "team": ["broken"]}, "TEAM_DISABLED_MEMBER"
+        _seed_writer(client)
+        return "/api/agents/nils", {"team": ["broken"]}, "TEAM_DISABLED_MEMBER"
+    # cycle: a file on disk already points at the slug we are about to write.
+    client.roster_root.mkdir(parents=True, exist_ok=True)
+    (client.roster_root / "lead.md").write_text(
+        "---\nname: Lead\nteam: [head]\n---\nb\n", encoding="utf-8"
+    )
+    if verb == "POST":
+        return "/api/agents", {"name": "Head", "team": ["lead"]}, "TEAM_CYCLE"
+    assert client.post("/api/agents", json={"name": "Head", "team": []}).status_code == 201
+    return "/api/agents/head", {"team": ["lead"]}, "TEAM_CYCLE"
+
+
+@pytest.mark.parametrize("case", TEAM_WRITE_CASES)
+@pytest.mark.parametrize("verb", ("POST", "PUT"))
+def test_post_and_put_refuse_a_bad_team_with_a_named_tag_and_write_nothing(client, case, verb):
+    url, payload, tag = _team_write_payload(client, case, verb)
+    before = {p.name for p in client.roster_root.glob("*.md")} if client.roster_root.is_dir() else set()
+    resp = client.post(url, json=payload) if verb == "POST" else client.put(url, json=payload)
+    assert resp.status_code == 400, resp.text
+    body = resp.json()
+    assert body.get("error_tag") == tag, body
+    after = {p.name for p in client.roster_root.glob("*.md")} if client.roster_root.is_dir() else set()
+    if verb == "POST":
+        assert after == before, f"POST {case} wrote {after - before}"
+    else:
+        # PUT must not persist the rejected team onto the existing file.
+        if case == "self":
+            text = (client.roster_root / "nils.md").read_text(encoding="utf-8")
+            assert "team:" not in text or "nils" not in text.split("team:", 1)[-1].split("\n", 1)[0]
+        if case == "missing":
+            text = (client.roster_root / "nils.md").read_text(encoding="utf-8")
+            assert "nobody" not in text
+        if case == "disabled":
+            text = (client.roster_root / "nils.md").read_text(encoding="utf-8")
+            assert "broken" not in text
+        if case == "cycle":
+            text = (client.roster_root / "head.md").read_text(encoding="utf-8")
+            assert "lead" not in text.split("---", 2)[1]
+
+
+def test_list_runs_can_be_filtered_by_agent_id(client):
+    assert client.post("/api/agents", json=WRITER).status_code == 201
+    assigned = client.post("/api/runs", json={"goal": GOAL, "agent_id": "nils"})
+    assert assigned.status_code == 201, assigned.text
+    client.post("/api/runs", json={"goal": "a run with no agent"})
+    scoped = client.get("/api/runs?agent_id=nils").json()
+    rows = scoped["runs"]
+    assert scoped["items"] == rows
+    assert len(rows) == 1
+    assert rows[0]["agent_id"] == "nils"
+
+
+def test_a_run_is_refused_when_a_member_file_vanishes_before_start(client):
+    """A team that goes bad between roster load and POST /api/runs must 400,
+    never hang or 500. The manager still exists; its member file does not.
+    """
+    assert client.post("/api/agents", json=WRITER).status_code == 201
+    assert client.post("/api/agents", json=RESEARCHER).status_code == 201
+    made = client.post("/api/agents", json=DIRECTOR)
+    assert made.status_code == 201, made.text
+    (client.roster_root / "nils.md").unlink()
+    before = client.get("/api/runs").json()["runs"]
+    resp = client.post("/api/runs", json={"goal": GOAL, "agent_id": "dara"})
+    assert resp.status_code == 400, resp.text
+    assert resp.json().get("error_tag") == "TEAM_MISSING_MEMBER", resp.json()
+    after = client.get("/api/runs").json()["runs"]
+    assert len(after) == len(before), "a refused run must not be created"
+
+
 # ---------------------------------------------------------------------- UI
 APP_JS = (REPO_ROOT / "omniagentos_starter" / "static" / "app.js").read_text(encoding="utf-8")
 INDEX = (REPO_ROOT / "omniagentos_starter" / "static" / "index.html").read_text(encoding="utf-8")
@@ -383,6 +486,33 @@ def test_the_run_view_shows_the_delegation():
     assert "worker-agent" in block, "the chip lives on the lane doing the work"
     assert '"team.delegated"' in APP_JS.split("var EVENT_TYPES = [")[1].split("];")[0]
     assert 'data-testid="task-member"' in APP_JS
+
+
+def test_each_task_row_joins_team_delegated_into_per_task_state():
+    """The worker chip already works; the per-task marker did not.
+
+    team.delegated fires before planner.plan, so a side-map keyed after
+    worker.started is how the marker never rendered. The join has to land
+    on the task object itself, and both the Workers timeline and the
+    quality-gate / plan rows have to read it.
+    """
+    plan = APP_JS.split('case "planner.plan"')[1].split("case ")[0]
+    assert "state.tasks" in plan, "planner.plan must seed per-task state so delegations can join"
+    delegated = APP_JS.split('case "team.delegated"')[1].split("case ")[0]
+    assert "state.tasks" in delegated, (
+        "team.delegated must join onto state.tasks[task_id], not only a side map "
+        "that renderTasks looks up later"
+    )
+    assert ".member" in delegated
+    render = APP_JS.split("function renderTasks()")[1].split("function renderCards()")[0]
+    assert "taskMemberHtml(t)" in render
+    helper = APP_JS.split("function taskMemberHtml(")[1].split("function taskForSource")[0]
+    assert 'data-testid="task-member"' in helper
+    # Plan timeline and quality-gate must paint the same marker, not only the chip.
+    dod = APP_JS.split("function renderDod()")[1].split("function renderTasks()")[0]
+    assert "taskMemberHtml" in plan
+    assert "taskMemberHtml" in dod
+    assert 'params.get("run_id")' in APP_JS, "a finished run is re-opened at /?run_id="
 
 
 def test_the_form_can_build_a_team_without_offering_self():

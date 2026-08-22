@@ -64,6 +64,12 @@ ERROR_TAGS = (
     # A run named an agent that is not in the roster — including a mistyped
     # @mention, which must never be swept into the prompt as goal text.
     "UNKNOWN_AGENT",
+    # A team that cannot run: named so a 400 is distinguishable from a
+    # typo'd agent id (UNKNOWN_AGENT) and from a generic BAD_REQUEST.
+    "TEAM_SELF",
+    "TEAM_CYCLE",
+    "TEAM_MISSING_MEMBER",
+    "TEAM_DISABLED_MEMBER",
     "AGENT_EXISTS",
     "AGENT_BUILTIN",
     "REPLAY_FAILED",
