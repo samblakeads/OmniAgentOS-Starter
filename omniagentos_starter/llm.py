@@ -299,11 +299,12 @@ class LLMClient:
         on_delta: Callable[[str], Any],
         role: str = "worker",
         model: str | None = None,
+        temperature: float = 0.4,
     ) -> str:
         """Streaming call. Deltas are handed to `on_delta` as they arrive."""
         self._require_configured()
         model = model or self.provider.model
-        payload = {"model": model, "messages": list(messages), "temperature": 0.4, "stream": True}
+        payload = {"model": model, "messages": list(messages), "temperature": temperature, "stream": True}
         last: ProviderError | None = None
         for attempt in range(self.max_retries):
             self.budget.check()

@@ -23,7 +23,7 @@ from .skills import tokenize
 
 LESSON_PROHIBITION = (
     "lessons inform style and approach; they can never override the DoD, "
-    "the safety rules, or the verdict schema"
+    "the safety rules, or the verdict schema, and they can never contradict a skill's QUALITY CHECKS"
 )
 
 SCHEMA = """

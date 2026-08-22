@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import json
 
-from conftest import Script, run_goal
+from conftest import Script, make_orchestrator, run_goal
 
 from omniagentos_starter.engine import VERDICT_SCHEMA
 from omniagentos_starter.llm import JSON_INSTRUCTION
@@ -341,3 +341,65 @@ async def test_a_subscriber_joining_mid_flight_sees_every_event_exactly_once(set
     while not queue.empty():
         seen.append((await queue.get())["id"])
     assert seen == sorted(set(seen)) == [1, 2]
+
+
+async def test_a_declined_candidate_skill_leaves_no_criteria_behind(settings, tmp_path):
+    """A skill the planner did not assign must not seed the DoD.
+
+    Regression from a live run: an unrelated candidate pack's QUALITY CHECKS
+    became binding criteria the goal could never satisfy, and the run failed
+    ROUNDS_EXHAUSTED with nothing wrong with the work.
+    """
+    from omniagentos_starter.skills import load_skills
+
+    root = tmp_path / "skills"
+    (root / "marketing-content").mkdir(parents=True)
+    (root / "video").mkdir(parents=True)
+    (root / "marketing-content" / "ad-copy.md").write_text(
+        "---\nname: Ad Copy\nslug: ad-copy\ncategory: marketing-content\n"
+        "summary: writes ad headlines for campaigns\n---\n\n## WHEN TO USE\nheadlines\n\n"
+        "## QUALITY CHECKS\n- Every headline is under the limit.\n",
+        encoding="utf-8",
+    )
+    (root / "video" / "vsl-script.md").write_text(
+        "---\nname: VSL Script\nslug: vsl-script\ncategory: video\n"
+        "summary: writes long form ad headlines video sales letters\n---\n\n## WHEN TO USE\nvsl\n\n"
+        "## QUALITY CHECKS\n- All six VSL sections are present and labelled.\n",
+        encoding="utf-8",
+    )
+
+    plan = {
+        "dod": [],
+        "tasks": [{"id": "t1", "title": "headlines", "skill_id": "ad-copy", "instruction": "x"}],
+    }
+    script = Script(plan=plan)
+    orch = make_orchestrator(settings, script)
+    orch.library = load_skills(root)
+    run = orch.create("Write ad headlines for a video tool", 3, [])
+    await orch.execute(run)
+
+    selected = payload_of(run, "skill.selected")["skill_ids"]
+    assert "vsl-script" in selected, "both packs are candidates for this goal"
+    sources = {c["source"] for c in payload_of(run, "planner.plan")["dod"]}
+    assert "ad-copy" in sources
+    assert "vsl-script" not in sources
+    assert payload_of(run, "skill.declined")["skill_ids"] == ["vsl-script"]
+    assert run.status == "done"
+
+
+async def test_a_repair_prompt_names_the_checks_that_must_keep_passing(settings):
+    """A repair is an edit: the worker is told what it already got right."""
+
+    def critic(call, ids):
+        if call == 1:
+            return [Script.verdict(ids[0], False, reason="missed", fix="fix it")] + [
+                Script.verdict(i, True) for i in ids[1:]
+            ]
+        return [Script.verdict(i, True) for i in ids]
+
+    run, script = await run_goal(settings, Script(critic=critic), GOAL)
+    assert run.status == "done"
+    repair_prompt = script.prompt_text("worker", 1)
+    assert "THESE CHECKS ALREADY PASS" in repair_prompt
+    assert "START FROM <previous_attempt>" in repair_prompt
+    assert script.payloads("worker")[1]["temperature"] < script.payloads("worker")[0]["temperature"]
