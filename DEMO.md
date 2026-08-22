@@ -7,7 +7,7 @@ off a screen.
 ## DoD-parseable goals (machine-read by tests/dod/_harness.py::parse_demo_goals — keep byte-for-byte identical to the copy-paste blocks below)
 
 ```dod-goals
-Write 3 Meta feed ad headlines for a $149 12-week strength program for women over 40. Each headline must be 30 characters or fewer, no exceptions. ||| dod: Every headline must contain the exact phrase 'Stronger at 40+'
+Write 3 Meta feed ad copy variants for a $149 12-week strength program for women over 40 using the PAS framework. Each variant: primary text under 125 characters, one headline under 40 characters, and a labelled P/A/S breakdown. ||| dod: Every variant must contain the exact phrase 'Stronger at 40+'
 Policy: Refunds are available within 30 days of purchase for unused subscriptions. After 30 days, no refunds are issued except for billing errors, which are refunded in full once verified. Goal: A customer emailed asking for a refund on a subscription they bought 38 days ago, no billing error involved. Draft the reply, citing the specific policy clause for the decision.
 Draft a 5-email onboarding sequence for OmniAgentOS Starter and save each email as a separate file named email-1.md, email-2.md, email-3.md, email-4.md, and email-5.md in the workspace.
 ```
@@ -50,39 +50,42 @@ Draft a 5-email onboarding sequence for OmniAgentOS Starter and save each email 
 Copy-paste exactly:
 
 ```
-Write 3 Meta feed ad headlines for a $149 12-week strength program for
-women over 40. Each headline must be 30 characters or fewer, no exceptions.
+Write 3 Meta feed ad copy variants for a $149 12-week strength program for
+women over 40 using the PAS framework. Each variant: primary text under 125
+characters, one headline under 40 characters, and a labelled P/A/S breakdown.
 ```
 
 Acceptance criteria → paste into the Acceptance criteria field:
 
 ```
-Every headline must contain the exact phrase 'Stronger at 40+'
+Every variant must contain the exact phrase 'Stronger at 40+'
 ```
 
-The goal box only has the ad brief — the 'Stronger at 40+' phrase rule lives in the
-separate Acceptance criteria field, which the Worker never sees, only the
-Critic does. That's deliberate: it's what makes the repair loop show up
-reliably on stage instead of depending on the model happening to trip a
-skill check.
+The goal box only asks for what the Ad Copy Framework Writer pack actually
+writes (variants, not bare headlines) — the 'Stronger at 40+' phrase rule
+lives in the separate Acceptance criteria field, which the Worker never sees,
+only the Critic does. That's deliberate: it's what makes the repair loop show
+up reliably on stage, on round 1, every time — not the pack's own framework
+or character-limit checks, which the goal is now written to satisfy on its own.
 
 **What the audience sees, beat by beat:**
 1. You hit Run — the Planner lane lights up, the goal token appears.
 2. The marketing-content skill panel highlights ("skill: Ad Copy Framework
-   Writer") — this goal was matched to a real skill pack, not written from
-   scratch.
-3. Worker lane streams three headlines in live — Worker-blind, it has no
-   idea the phrase-matching rule exists.
-4. Critic lane flips **red** — it fails the headlines against the
-   Acceptance criterion the Worker never saw (plus the skill's own
-   30-character QUALITY CHECK). The red card shows the exact criterion,
-   the offending headline, and the fix note.
+   Writer") — this goal is matched to, and assigned, that real skill pack.
+3. Worker lane streams three ad copy variants in live — Worker-blind, it
+   has no idea the phrase-matching rule exists.
+4. Critic lane flips **red** — driven by the hidden Acceptance criterion
+   (the phrase rule) the Worker never saw. The quality-gate checklist also
+   grades the pack's own checks — primary-text/headline character limits
+   and a labelled P/A/S breakdown — attributed "from skill: Ad Copy
+   Framework Writer". The red card shows the exact failing criterion, the
+   offending variant, and the fix note.
 5. Repair dispatches automatically — only the failing task reruns, not the
    whole plan.
 6. Critic card flips **green**, before/after comparison visible.
-7. Verifier lane passes; deliverable panel renders the final three headlines.
+7. Verifier lane passes; deliverable panel renders the final three variants.
 
-**What you say:** "Watch the critic card — it just failed the headlines
+**What you say:** "Watch the critic card — it just failed the variants
 against a rule the writer never even saw, and the system repaired it
 without me touching anything. That's the production line catching what a
 single prompt would have shipped."
