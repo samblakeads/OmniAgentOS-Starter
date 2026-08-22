@@ -594,6 +594,58 @@ def _validate_hierarchy(roster: AgentRoster) -> None:
             )
 
 
+def team_failure(agent: Agent, roster: AgentRoster | None) -> tuple[str, str] | None:
+    """Named reason this manager cannot run, against the roster as it stands now.
+
+    The write path already refuses these shapes. Run start must re-run the
+    same walk — self, missing member, cycle, depth, disabled member — so a
+    hand-edited cyclic pair is TEAM_CYCLE at POST /api/runs, not a started
+    run and not a disabled-member disguise. Cycle and depth are walked
+    before the disabled-member check for that reason.
+    """
+    if not agent.team or roster is None:
+        return None
+    if agent.slug in agent.team:
+        return ("TEAM_SELF", "an agent cannot be a member of its own team")
+    missing = [m for m in agent.team if roster.by_id(m) is None]
+    if missing:
+        return (
+            "TEAM_MISSING_MEMBER",
+            "these team members are not in the roster: " + ", ".join(sorted(missing)),
+        )
+
+    def walk(slug: str, seen: tuple[str, ...]) -> int | str:
+        if slug in seen:
+            return "that team would create a cycle: " + " → ".join([*seen, slug])
+        member = agent if slug == agent.slug else roster.by_id(slug)
+        if member is None or not member.team:
+            return 0
+        deepest = 0
+        for child in member.team:
+            below = walk(child, (*seen, slug))
+            if isinstance(below, str):
+                return below
+            deepest = max(deepest, below)
+        return deepest + 1
+
+    result = walk(agent.slug, ())
+    if isinstance(result, str):
+        return ("TEAM_CYCLE", result)
+    depth = result + 1
+    if depth > MAX_TEAM_DEPTH:
+        return (
+            "TEAM_TOO_DEEP",
+            f"that team is {depth} agents deep; the limit is {MAX_TEAM_DEPTH}",
+        )
+    disabled = [m for m in agent.team if not (roster.by_id(m) or agent).enabled]
+    if disabled:
+        return (
+            "TEAM_DISABLED_MEMBER",
+            "these team members are disabled: " + ", ".join(sorted(disabled)),
+        )
+    return None
+
+
 def _unloadable(path: Path, root: Path, reason: str) -> Agent:
     """A placeholder for a roster file that could not be parsed at all."""
     slug = safe_agent_slug(path.stem) or "unreadable-agent"
@@ -885,42 +937,9 @@ class AgentStore:
         experience than refusing the write, and the checks are the same ones —
         so they run here too, against the roster as it stands.
         """
-        if not agent.team or roster is None:
-            return
-        if agent.slug in agent.team:
-            raise AgentError("TEAM_SELF", "an agent cannot be a member of its own team")
-        missing = [m for m in agent.team if roster.by_id(m) is None]
-        if missing:
-            raise AgentError(
-                "TEAM_MISSING_MEMBER",
-                f"these team members are not in the roster: {', '.join(sorted(missing))}",
-            )
-        # Walk before the disabled-member check: a member that is itself a
-        # broken manager (disabled because it points at us) is a CYCLE, and
-        # naming it TEAM_DISABLED_MEMBER would hide the shape the operator
-        # actually wrote.
-        def walk(slug: str, seen: tuple[str, ...]) -> int:
-            if slug in seen:
-                raise AgentError(
-                    "TEAM_CYCLE", "that team would create a cycle: " + " → ".join([*seen, slug])
-                )
-            member = agent if slug == agent.slug else roster.by_id(slug)
-            if member is None or not member.team:
-                return 0
-            return max(walk(m, (*seen, slug)) for m in member.team) + 1
-
-        depth = walk(agent.slug, ()) + 1
-        if depth > MAX_TEAM_DEPTH:
-            raise AgentError(
-                "BAD_REQUEST",
-                f"that team is {depth} agents deep; the limit is {MAX_TEAM_DEPTH}",
-            )
-        disabled = [m for m in agent.team if not (roster.by_id(m) or agent).enabled]
-        if disabled:
-            raise AgentError(
-                "TEAM_DISABLED_MEMBER",
-                f"these team members are disabled: {', '.join(sorted(disabled))}",
-            )
+        failure = team_failure(agent, roster)
+        if failure is not None:
+            raise AgentError(failure[0], failure[1])
 
     @staticmethod
     def _refuse_builtin_slug(slug: str) -> None:

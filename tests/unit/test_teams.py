@@ -16,7 +16,8 @@ from fastapi.testclient import TestClient
 from omniagentos_starter.agents import MAX_TEAM_DEPTH, AgentError, AgentStore, load_agents
 from omniagentos_starter.api import create_app
 from omniagentos_starter.config import Settings
-from omniagentos_starter.skills import load_skills
+from omniagentos_starter.skills import builtin_pack, load_skills
+from omniagentos_starter.tools import TOOL_NAMES
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SKILLS_ROOT = REPO_ROOT / "skills"
@@ -341,6 +342,23 @@ async def test_per_task_pack_relevance_splits_a_collapsed_plan(settings, tmp_pat
     assert {c.get("member") for c in skill_dod if c.get("task_id") == "t2"} == {"ava"}
     assert not _events(run, "skill.selection_fallback")
 
+    selected = _events(run, "skill.selected")
+    assert selected, "team runs must still emit skill.selected"
+    honesty = selected[-1]
+    assert honesty["tasks"] == [
+        {"task_id": "t1", "member": "max", "skill_id": "ad-copy-framework-writer"},
+        {"task_id": "t2", "member": "ava", "skill_id": "refund-request-handler"},
+    ], honesty
+    assert run.skills == honesty["tasks"]
+    planner_dod = [c for c in plan["dod"] if c["source"] == "planner"]
+    assert planner_dod and all(not c.get("task_id") for c in planner_dod), planner_dod
+
+    packs_block = script.prompt_text("planner").split("SKILL PACKS", 1)[1]
+    slugs = ["ad-copy-framework-writer", "refund-request-handler", "vsl-script-builder"]
+    positions = [packs_block.find(s) for s in slugs]
+    assert all(p >= 0 for p in positions), packs_block[:400]
+    assert positions == sorted(positions), "assignable must be a sorted list, not a set"
+
 
 @pytest.mark.asyncio
 async def test_a_task_matching_no_member_pack_uses_generalist_and_emits_fallback(settings, tmp_path):
@@ -386,11 +404,175 @@ async def test_a_task_matching_no_member_pack_uses_generalist_and_emits_fallback
     assert "refund-request-handler" not in sources
 
 
+def _patch_best_match(library, table):
+    """table: frozenset(allowed slugs) -> (pack_slug, score, below_floor)."""
+
+    def routed(text, allowed=None):
+        key = frozenset(allowed or ())
+        slug, score, below = table[key]
+        pack = None if slug is None else library.by_id(slug) or (
+            builtin_pack() if slug == builtin_pack().slug else None
+        )
+        return pack, score, below
+
+    library.best_match = routed  # type: ignore[method-assign]
+
+
+@pytest.mark.asyncio
+async def test_a_member_is_eligible_only_when_they_have_the_needed_tool(settings, tmp_path):
+    """F1(a): writes_files → write_file. Ava's better pack cannot win without it."""
+    max_agent = {
+        "name": "Max",
+        "title": "",
+        "persona": COPYWRITER["persona"],
+        "skills": ["refund-request-handler"],
+        "tools": list(TOOL_NAMES),
+    }
+    ava_agent = {
+        "name": "Ava",
+        "title": "",
+        "persona": SUPPORT["persona"],
+        "skills": ["refund-request-handler"],
+        "tools": ["read_file", "list_files"],
+    }
+    plan = {
+        "dod": [{"id": "p1", "criterion": "ok"}],
+        "tasks": [
+            {
+                "id": "t1",
+                "title": "Refund reply",
+                "skill_id": "refund-request-handler",
+                "instruction": (
+                    "Draft a short reply to a customer refund request citing the 30-day "
+                    "refund policy and decide Approved, Denied, or Escalate."
+                ),
+                "member": "ava",
+                "writes_files": True,
+            }
+        ],
+    }
+    script = Script(plan=plan)
+    orch = _orch(settings, script, tmp_path, [max_agent, ava_agent, STUDIO])
+    run = orch.create(
+        "Draft a refund reply citing the 30-day policy and save it to a file.",
+        1,
+        [],
+        agent_id="remy",
+    )
+    await orch.execute(run)
+
+    delegated = _events(run, "team.delegated")
+    assert len(delegated) == 1, delegated
+    assert delegated[0]["member"] == "max", delegated
+    assert "write_file" in delegated[0]["tools"]
+    assert delegated[0]["skill_id"] == "refund-request-handler"
+
+
+@pytest.mark.asyncio
+async def test_spread_yields_when_the_other_pack_is_much_weaker(settings, tmp_path):
+    """F1(b): unused is not enough — spread only among near-ties of the top score."""
+    plan = {
+        "dod": [{"id": "p1", "criterion": "Both parts are present."}],
+        "tasks": [
+            {
+                "id": "t1",
+                "title": "Headline one",
+                "skill_id": "ad-copy-framework-writer",
+                "instruction": "Write one PAS headline for a Meta feed ad.",
+                "member": "max",
+            },
+            {
+                "id": "t2",
+                "title": "Headline two",
+                "skill_id": "ad-copy-framework-writer",
+                "instruction": "Write a second PAS headline for the same Meta feed ad.",
+                "member": "max",
+            },
+        ],
+    }
+    script = Script(plan=plan)
+    orch = _orch(settings, script, tmp_path, [COPYWRITER, SUPPORT, STUDIO])
+    _patch_best_match(
+        orch.library,
+        {
+            frozenset({"ad-copy-framework-writer", "vsl-script-builder"}): (
+                "ad-copy-framework-writer",
+                10.0,
+                False,
+            ),
+            frozenset({"refund-request-handler"}): ("refund-request-handler", 3.0, False),
+        },
+    )
+    run = orch.create(
+        "Write two PAS ad headlines for a Meta feed ad.",
+        1,
+        [],
+        agent_id="remy",
+    )
+    await orch.execute(run)
+
+    delegated = {d["task_id"]: d for d in _events(run, "team.delegated")}
+    assert set(delegated) == {"t1", "t2"}, delegated
+    assert delegated["t1"]["member"] == "max"
+    assert delegated["t2"]["member"] == "max", "weaker unused pack must not steal the task"
+    assert delegated["t1"]["skill_id"] == "ad-copy-framework-writer"
+    assert delegated["t2"]["skill_id"] == "ad-copy-framework-writer"
+
+
+@pytest.mark.asyncio
+async def test_fallback_is_per_chosen_member_not_anyone_who_cleared(settings, tmp_path):
+    """F1(c): Ava cleared the floor but lacks the tool; Max is chosen and falls back."""
+    ava_agent = {**SUPPORT, "tools": ["read_file", "list_files"]}
+    plan = {
+        "dod": [{"id": "p1", "criterion": "ok"}],
+        "tasks": [
+            {
+                "id": "t1",
+                "title": "Refund reply",
+                "skill_id": "refund-request-handler",
+                "instruction": (
+                    "Draft a short reply to a customer refund request citing the 30-day "
+                    "refund policy and decide Approved, Denied, or Escalate."
+                ),
+                "member": "ava",
+                "writes_files": True,
+            }
+        ],
+    }
+    script = Script(plan=plan)
+    orch = _orch(settings, script, tmp_path, [COPYWRITER, ava_agent, STUDIO])
+    _patch_best_match(
+        orch.library,
+        {
+            frozenset({"ad-copy-framework-writer", "vsl-script-builder"}): (
+                "ad-copy-framework-writer",
+                1.0,
+                True,
+            ),
+            frozenset({"refund-request-handler"}): ("refund-request-handler", 9.0, False),
+        },
+    )
+    run = orch.create(
+        "Draft a refund reply citing the 30-day policy and save it to a file.",
+        1,
+        [],
+        agent_id="remy",
+    )
+    await orch.execute(run)
+
+    delegated = _events(run, "team.delegated")
+    assert len(delegated) == 1, delegated
+    assert delegated[0]["member"] == "max"
+    assert delegated[0]["skill_id"] == "general-assistant"
+    fallback = _events(run, "skill.selection_fallback")
+    assert fallback and fallback[-1]["task_id"] == "t1"
+    assert fallback[-1]["member"] == "max"
+    assert fallback[-1]["skill_id"] == "general-assistant"
+
+
 @pytest.mark.asyncio
 async def test_a_single_agent_run_is_unchanged_by_per_task_team_routing(settings, tmp_path):
     """Non-manager runs still use whole-goal routing; no team.delegated, no per-task override."""
-    from omniagentos_starter.skills import builtin_pack
-
     plan = {
         "dod": [{"id": "p1", "criterion": "The deliverable answers the goal."}],
         "tasks": [
@@ -423,6 +605,97 @@ async def test_a_single_agent_run_is_unchanged_by_per_task_team_routing(settings
     refund = orch.library.by_id("refund-request-handler")
     assert f"skill-sha256:{refund.sha256}" in prompt
     assert f"skill-sha256:{builtin_pack().sha256}" not in prompt
+
+
+TWO_TASK_SOLO_PLAN = {
+    "dod": [{"id": "p1", "criterion": "Both parts are present."}],
+    "tasks": [
+        {
+            "id": "t1",
+            "title": "Decision",
+            "skill_id": "refund-request-handler",
+            "instruction": "Decide Approved, Denied, or Escalate for the refund request.",
+            "depends_on": [],
+        },
+        {
+            "id": "t2",
+            "title": "Reply",
+            "skill_id": "refund-request-handler",
+            "instruction": "Draft the customer-facing refund reply citing the 30-day policy.",
+            "depends_on": ["t1"],
+        },
+    ],
+}
+
+# Event types a single-agent two-task run emitted before per-task team scoping
+# existed. The sequence must stay this shape: whole-goal select, no delegation,
+# no per-task fallback.
+_SOLO_TWO_TASK_TYPES = (
+    "run.started",
+    "memory.recalled",
+    "skill.selected",
+    "planner.plan",
+    "worker.started",
+    "worker.finished",
+    "critic.verdict",
+    "verifier.verdict",
+    "run.done",
+)
+
+
+def _assert_solo_two_task_shape(run, script, *, agent_id: str):
+    """Per-task relevance/scoping must not fire off a manager run."""
+    types = [e["type"] for e in run.bus.events]
+    for expected in _SOLO_TWO_TASK_TYPES:
+        assert expected in types, f"{expected} missing from {types}"
+    assert "team.delegated" not in types
+    selected = _events(run, "skill.selected")
+    assert len(selected) == 1, selected
+    payload = selected[0]
+    assert "tasks" not in payload
+    assert "refund-request-handler" in payload["skill_ids"], payload["skill_ids"]
+    assert all(isinstance(s, str) for s in run.skills)
+    assert run.skills == payload["skill_ids"]
+    plan = _events(run, "planner.plan")[0]
+    assert [t["id"] for t in plan["tasks"]] == ["t1", "t2"]
+    skill_dod = [c for c in plan["dod"] if c["source"] not in ("planner", "operator")]
+    assert skill_dod, plan["dod"]
+    assert all(not c.get("task_id") for c in skill_dod), skill_dod
+    assert all(not c.get("member") for c in skill_dod), skill_dod
+    verifier = script.prompt_text("verifier")
+    assert "GRADE the full deliverable" in verifier
+    assert "GRADE ONLY task" not in verifier
+    if agent_id:
+        assert payload["skill_ids"] == ["refund-request-handler"], payload["skill_ids"]
+        assert all(not t.get("member") for t in plan["tasks"])
+
+
+@pytest.mark.asyncio
+async def test_a_single_agent_two_task_run_is_unchanged_by_per_task_scoping(settings, tmp_path):
+    """F3: pack checks still grade the merged deliverable for a solo agent."""
+    script = Script(plan=TWO_TASK_SOLO_PLAN)
+    orch = _orch(settings, script, tmp_path, [COPYWRITER, SUPPORT, STUDIO])
+    goal = (
+        "A customer is asking for a refund 12 days after purchase. Decide the "
+        "outcome and draft the reply, grounded on our 30-day refund policy."
+    )
+    run = orch.create(goal, 1, [], agent_id="ava")
+    await orch.execute(run)
+    _assert_solo_two_task_shape(run, script, agent_id="ava")
+
+
+@pytest.mark.asyncio
+async def test_a_no_agent_two_task_run_is_unchanged_by_per_task_scoping(settings, tmp_path):
+    """F3: no-agent multi-task is whole-goal selection, same verifier scope."""
+    script = Script(plan=TWO_TASK_SOLO_PLAN)
+    orch = _orch(settings, script, tmp_path, [COPYWRITER, SUPPORT, STUDIO])
+    goal = (
+        "A customer is asking for a refund 12 days after purchase. Decide the "
+        "outcome and draft the reply, grounded on our 30-day refund policy."
+    )
+    run = orch.create(goal, 1, [])
+    await orch.execute(run)
+    _assert_solo_two_task_shape(run, script, agent_id="")
 
 
 @pytest.mark.asyncio
@@ -700,6 +973,30 @@ def test_a_run_is_refused_when_a_member_file_vanishes_before_start(client):
     resp = client.post("/api/runs", json={"goal": GOAL, "agent_id": "dara"})
     assert resp.status_code == 400, resp.text
     assert resp.json().get("error_tag") == "TEAM_MISSING_MEMBER", resp.json()
+    after = client.get("/api/runs").json()["runs"]
+    assert len(after) == len(before), "a refused run must not be created"
+
+
+def test_a_hand_edited_cycle_is_refused_at_run_start(client):
+    """F2: a cyclic pair written after load is TEAM_CYCLE at POST /api/runs.
+
+    The write path already refuses this shape. A drop-in directory can still
+    grow a cycle between load and the next run; that must 400, never start.
+    """
+    assert client.post("/api/agents", json={"name": "Alpha"}).status_code == 201
+    made = client.post("/api/agents", json={"name": "Bravo", "team": ["alpha"]})
+    assert made.status_code == 201, made.text
+    alpha = client.roster_root / "alpha.md"
+    text = alpha.read_text(encoding="utf-8")
+    assert "team: []" in text, text
+    alpha.write_text(text.replace("team: []", "team: [bravo]", 1), encoding="utf-8")
+
+    before = client.get("/api/runs").json()["runs"]
+    resp = client.post("/api/runs", json={"goal": GOAL, "agent_id": "alpha"})
+    assert resp.status_code == 400, resp.text
+    body = resp.json()
+    assert body.get("error_tag") == "TEAM_CYCLE", body
+    assert "cycle" in (body.get("message") or "").lower()
     after = client.get("/api/runs").json()["runs"]
     assert len(after) == len(before), "a refused run must not be created"
 

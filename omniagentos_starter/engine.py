@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any, NamedTuple
 from xml.sax.saxutils import escape as xml_escape
 
-from .agents import Agent, AgentRoster, builtin_agent, load_agents, safe_agent_slug
+from .agents import Agent, AgentRoster, builtin_agent, load_agents, safe_agent_slug, team_failure
 from .config import (
     MAX_ARTIFACT_CHARS,
     MAX_CONCURRENT_RUNS,
@@ -328,7 +328,9 @@ class RunState:
     budget: Budget | None = None
     workspace: WorkspaceGuard | None = None
     task: asyncio.Task | None = None
-    skills: list[str] = field(default_factory=list)
+    # Whole-goal pack slugs on a solo run; on a team run, one
+    # {task_id, member, skill_id} dict per delegated task.
+    skills: list = field(default_factory=list)
     replay: bool = False
     agent_id: str = ""
     agent: Agent | None = None
@@ -616,27 +618,10 @@ class Engine:
         run = self.run
         # A member file deleted between roster load and this start must not
         # become a hang, a 500, or the manager silently doing the work.
-        if self.agent is not None and self.agent.team and self.roster is not None:
-            missing = [
-                slug
-                for slug in self.agent.team
-                if self.roster.by_id(slug) is None
-            ]
-            if missing:
-                return self._fail(
-                    "TEAM_MISSING_MEMBER",
-                    "team members are not in the roster: " + ", ".join(sorted(missing)),
-                )
-            disabled = [
-                slug
-                for slug in self.agent.team
-                if self.roster is not None and not (self.roster.by_id(slug) or self.agent).enabled
-            ]
-            if disabled:
-                return self._fail(
-                    "TEAM_DISABLED_MEMBER",
-                    "team members are disabled: " + ", ".join(sorted(disabled)),
-                )
+        if self.agent is not None and self.agent.team:
+            failure = team_failure(self.agent, self.roster)
+            if failure is not None:
+                return self._fail(failure[0], failure[1])
         run.status = "running"
         run.started_ts = time.time()
         self.memory.create_run(run.id, run.goal, agent_id=run.agent_id)
@@ -744,8 +729,10 @@ class Engine:
             # A manager's own `skills:` is usually empty — the capability lives
             # with the team, so the router chooses from everything the team
             # carries and the planner then matches task to member.
-            combined = {slug for member in self.team for slug in member.skills}
-            allowed = combined or None
+            # Sorted list, not a set: assignable order must not follow
+            # PYTHONHASHSEED (planner candidates and _trim_dod round-robin).
+            combined = sorted({slug for member in self.team for slug in member.skills})
+            allowed = set(combined) or None
             seen_team: set[str] = set()
             for slug in combined:
                 pack = self.library.by_id(slug)
@@ -797,6 +784,11 @@ class Engine:
         bench_is_open = fallback or self.agent is None or bool(self.team)
         if bench_is_open and all(p.slug != general.slug for p in self.assignable):
             self.assignable.append(general)
+        if self.team:
+            # Whole-goal top-k is not what a team run executed. skill.selected
+            # and run.skills wait for per-task routing; assignable still feeds
+            # the planner's candidate list.
+            return
         self.run.skills = [p.slug for p in packs]
         if fallback:
             self.bus.emit(
@@ -996,12 +988,17 @@ class Engine:
         self._enforce_routing()
         self._route_team_tasks()
         self._delegate()
-        # Seed the DoD from the skills the plan ACTUALLY uses, bound to the
-        # task that uses them. A candidate skill the planner declined must not
-        # leave its standards behind — and a member's pack must not bind
-        # criteria to a task somebody else executed.
+        self._announce_team_skills()
+        # Seed the DoD from the skills the plan ACTUALLY uses. On a team run
+        # those checks are bound to the task that uses them so a copywriter's
+        # QUALITY CHECKS cannot fail a support reply. Solo and no-agent runs
+        # keep the whole-goal seed: pack checks grade the merged deliverable.
         used = {t.skill_id for t in self.tasks.values()}
-        seeded = self._seed_from_tasks()
+        if self.team:
+            seeded = self._seed_from_tasks()
+        else:
+            used_packs = [p for p in self.assignable if p.slug in used]
+            seeded = self._seed_from(used_packs)
         declined = self._declined(used)
 
         dod, dod_pruned = self._trim_dod(operator, seeded, added)
@@ -1091,6 +1088,18 @@ class Engine:
             allowed &= set(self.agent.tools)
         return [t for t in TOOL_NAMES if t in allowed]
 
+    def _task_needed_tools(self, task: Task) -> tuple[str, ...]:
+        """Tools the task's own declaration requires of whoever executes it."""
+        if task.writes_files:
+            return ("write_file",)
+        return ()
+
+    def _member_covers_tools(self, member: Agent, needed: tuple[str, ...]) -> bool:
+        if not needed:
+            return True
+        have = set(self._member_tools(member))
+        return all(tool in have for tool in needed)
+
     def _primary_task(self) -> Task:
         """The task that produces the deliverable: no dependencies, else the first."""
         for task in self.tasks.values():
@@ -1108,6 +1117,11 @@ class Engine:
         parts = [str(p).strip() for p in (task.title, task.instruction) if str(p).strip()]
         return " ".join(parts) if parts else self.run.goal
 
+    # Spread a later task onto an unused member only when that member's best
+    # pack is in the same league as the top score. A barely-above-floor pack
+    # must not beat a strictly better one just because its owner is idle.
+    TEAM_SPREAD_RATIO = 0.8
+
     def _route_team_tasks(self) -> None:
         """Assign each delegated task to a member+pack by relevance, then spread.
 
@@ -1117,32 +1131,35 @@ class Engine:
         on goals. The task goes to the member owning the best-matching pack,
         and only that pack seeds the task's criteria.
 
-        When distinct tasks match distinct members they stay distinct — a
-        two-part brief must not collapse onto whoever the planner named first.
-        Tie-break is load (fewest tasks so far), then team order.
+        A member is eligible only when the task's declared needs (writes_files
+        → write_file) sit inside that member's effective tools. Spread then
+        only considers members whose best score is within TEAM_SPREAD_RATIO of
+        the top (or a tie); otherwise the top member takes it.
 
-        A task that clears no member's floor still needs an owner: the
-        best-fitting member executes with generalist checks only, and
-        ``skill.selection_fallback`` names the task.
+        Fallback is per (task, chosen member): a floor-clearing pack on
+        someone else does not skip the generalist when the chosen member's
+        own pack is below the floor.
         """
         if not self.team:
             return
         general = builtin_pack()
         loads = {m.slug: 0 for m in self.team}
         index = {m.slug: i for i, m in enumerate(self.team)}
-        scored: dict[str, list[tuple[float, Agent, SkillPack | None, bool]]] = {}
+        scored: dict[str, list[tuple[float, Agent, SkillPack | None, bool, bool]]] = {}
         order = self.order or list(self.tasks)
         for tid in order:
             task = self.tasks[tid]
             query = self._task_query(task)
-            rows: list[tuple[float, Agent, SkillPack | None, bool]] = []
+            needed = self._task_needed_tools(task)
+            rows: list[tuple[float, Agent, SkillPack | None, bool, bool]] = []
             for member in self.team:
+                eligible = self._member_covers_tools(member, needed)
                 allowed = set(member.skills)
                 if not allowed:
-                    rows.append((0.0, member, None, True))
+                    rows.append((0.0, member, None, True, eligible))
                     continue
                 pack, score, below = self.library.best_match(query, allowed=allowed)
-                rows.append((score, member, pack, below))
+                rows.append((score, member, pack, below, eligible))
             scored[tid] = rows
 
         def _pick_key(row: tuple) -> tuple:
@@ -1152,33 +1169,74 @@ class Engine:
         for tid in order:
             task = self.tasks[tid]
             rows = scored[tid]
-            cleared = [(s, m, p) for s, m, p, below in rows if not below and p is not None]
-            if cleared:
-                unused = [(s, m, p) for s, m, p in cleared if loads[m.slug] == 0]
-                used_exists = any(loads[m.slug] > 0 for _, m, _ in cleared)
-                pool = unused if unused and used_exists else cleared
-                pool.sort(key=_pick_key)
-                _score, member, pack = pool[0]
-                task.member = member.slug
-                task.skill_id = pack.slug
-                loads[member.slug] += 1
-                continue
-            unused_rows = [r for r in rows if loads[r[1].slug] == 0]
-            pool_rows = unused_rows or list(rows)
-            pool_rows.sort(key=_pick_key)
-            _score, member, _pack, _below = pool_rows[0]
+            eligible_rows = [r for r in rows if r[4]]
+            pool_source = eligible_rows or list(rows)
+            top_score = max(r[0] for r in pool_source)
+            if top_score > 0:
+                margin = top_score * self.TEAM_SPREAD_RATIO
+                competitive = [r for r in pool_source if r[0] >= margin]
+            else:
+                competitive = list(pool_source)
+            unused = [r for r in competitive if loads[r[1].slug] == 0]
+            used_exists = any(loads[r[1].slug] > 0 for r in competitive)
+            pool = unused if unused and used_exists else competitive
+            pool.sort(key=_pick_key)
+            _score, member, pack, below, _eligible = pool[0]
             task.member = member.slug
-            task.skill_id = general.slug
             loads[member.slug] += 1
-            self.bus.emit(
-                "skill.selection_fallback",
-                {
-                    "reason": "no member pack scored above the match floor for this task",
-                    "skill_id": general.slug,
-                    "task_id": task.id,
-                    "member": member.slug,
-                },
-            )
+            if pack is None or below:
+                task.skill_id = general.slug
+                self.bus.emit(
+                    "skill.selection_fallback",
+                    {
+                        "reason": "no member pack scored above the match floor for this task",
+                        "skill_id": general.slug,
+                        "task_id": task.id,
+                        "member": member.slug,
+                    },
+                )
+            else:
+                task.skill_id = pack.slug
+
+    def _announce_team_skills(self) -> None:
+        """skill.selected / run.skills name what each task actually ran.
+
+        Whole-goal top-k is the wrong report on a mixed team: a headline+refund
+        goal can select vsl-script-builder while every task ran something else.
+        Planner-authored extras stay run-wide; this only rewrites the skill
+        surfaces.
+        """
+        if not self.team:
+            return
+        rows: list[dict] = []
+        packs: list[SkillPack] = []
+        seen: set[str] = set()
+        for tid in self.order or list(self.tasks):
+            task = self.tasks[tid]
+            sid = task.skill_id or builtin_pack().slug
+            rows.append({"task_id": task.id, "member": task.member, "skill_id": sid})
+            if sid in seen:
+                continue
+            seen.add(sid)
+            pack = self.library.by_id(sid)
+            if pack is None and sid == builtin_pack().slug:
+                pack = builtin_pack()
+            if pack is not None:
+                packs.append(pack)
+        self.run.skills = rows
+        self.bus.emit(
+            "skill.selected",
+            {
+                "skill_ids": [row["skill_id"] for row in rows],
+                "tasks": rows,
+                "scores": [
+                    {"skill_id": p.slug, "score": self.selection_scores.get(p.slug, 0)}
+                    for p in packs
+                ],
+                "skills": [p.as_dict() for p in packs],
+                "library_count": self.library.count,
+            },
+        )
 
     def _enforce_routing(self) -> None:
         """The routed pack must actually reach a Worker.
@@ -1356,8 +1414,8 @@ class Engine:
                 # Bound checks from another member's pack are not this worker's to keep.
                 holding = [
                     c
-                    for c in self.dod
-                    if self.last_verdicts.get(c.id) is True and c.task_id == task.id
+                    for c in self._worker_dod(task)
+                    if self.last_verdicts.get(c.id) is True
                 ]
                 keep = (
                     "\nTHESE CHECKS ALREADY PASS — your new version must keep passing them:\n"
@@ -2136,28 +2194,13 @@ class Orchestrator:
     def _require_runnable_team(self, agent: Agent) -> None:
         """Refuse a manager whose team went bad after the roster was last written.
 
-        The write path already rejects these shapes; this is the same check at
-        run start, so a member file deleted between load and POST /api/runs
-        is a named 400 rather than a decorative team the manager executes.
+        The write path already rejects these shapes; this is the same full
+        hierarchy walk at run start (self, missing, cycle, depth, disabled),
+        so a hand-edited cyclic pair is a named 400 rather than a started run.
         """
-        if not agent.team:
-            return
-        if agent.slug in agent.team:
-            raise TeamUnrunnable(agent.slug, "TEAM_SELF", "an agent cannot be a member of its own team")
-        missing = [m for m in agent.team if self.roster.by_id(m) is None]
-        if missing:
-            raise TeamUnrunnable(
-                agent.slug,
-                "TEAM_MISSING_MEMBER",
-                "team members are not in the roster: " + ", ".join(sorted(missing)),
-            )
-        disabled = [m for m in agent.team if not (self.roster.by_id(m) or agent).enabled]
-        if disabled:
-            raise TeamUnrunnable(
-                agent.slug,
-                "TEAM_DISABLED_MEMBER",
-                "team members are disabled: " + ", ".join(sorted(disabled)),
-            )
+        failure = team_failure(agent, self.roster)
+        if failure is not None:
+            raise TeamUnrunnable(agent.slug, failure[0], failure[1])
 
     def split_agent_prefix(self, goal: str) -> tuple[str, str]:
         """`@slug do the thing` assigns the run to `slug`, same as the picker.
