@@ -35,9 +35,28 @@ from .engine import EventBus, Orchestrator, RunLimit, RunState
 from .llm import LLMClient
 from .redact import redact
 from .replay import ReplayUnavailable, replay_into, replay_metadata
-from .tools import WorkspaceGuard
+from .tools import WorkspaceGuard, runs_root, safe_run_id
 
 PROBE_TTL_SECONDS = 600
+
+
+def run_workspace_dir(workspace_dir: Path | str, run_id: str) -> Path | None:
+    """Resolve ``<workspace>/runs/<run_id>`` — or nothing at all.
+
+    The run id comes from the URL, so it is treated as hostile: reduced to the
+    same alphanumeric charset the engine uses when it creates the directory, and
+    then checked for containment in the runs tree. Handing an unsanitised
+    segment to WorkspaceGuard and trusting the guard afterwards does not work —
+    the guard polices what happens inside its root, and `..` chooses the root.
+    """
+    safe_id = safe_run_id(run_id)
+    if not safe_id or safe_id != str(run_id):
+        return None
+    root = runs_root(workspace_dir)
+    path = (root / safe_id).resolve()
+    if path == root or not path.is_relative_to(root) or not path.is_dir():
+        return None
+    return path
 
 
 def git_head(root: Path | None = None) -> str:
@@ -242,14 +261,36 @@ def create_app(settings: Settings | None = None, orchestrator: Orchestrator | No
         return JSONResponse({"run_id": run.id, "status": "running", "replay": True, "goal": run.goal}, status_code=201)
 
     async def _run_replay(run: RunState) -> None:
+        # Whatever goes wrong in here, the run must end. A background task that
+        # dies quietly leaves its run "running" for ever, and two of those are
+        # every concurrency slot the server has.
         try:
             await replay_into(run.bus or EventBus(run.id, orch.memory), run)
-        except ReplayUnavailable as exc:
+        except Exception as exc:
             run.status = "failed"
-            run.error_tag = "PROVIDER_NOT_CONFIGURED"
+            run.error_tag = (
+                "PROVIDER_NOT_CONFIGURED" if isinstance(exc, ReplayUnavailable) else "REPLAY_FAILED"
+            )
+            run.error_message = redact(f"{type(exc).__name__}: {exc}")[:300]
+            run.finished_ts = time.time()
             if run.bus:
-                run.bus.emit("run.failed", {"error_tag": "PROVIDER_NOT_CONFIGURED", "message": str(exc)})
+                run.bus.emit(
+                    "run.failed",
+                    {
+                        "run_id": run.id,
+                        "error_tag": run.error_tag,
+                        "message": run.error_message,
+                        "replay": True,
+                    },
+                )
                 run.bus.close()
+        finally:
+            if run.status not in ("done", "failed"):
+                run.status = "failed"
+                run.error_tag = run.error_tag or "REPLAY_FAILED"
+                if run.bus and not run.bus.done:
+                    run.bus.emit("run.failed", {"run_id": run.id, "error_tag": run.error_tag, "replay": True})
+                    run.bus.close()
 
     @api.get("/runs")
     async def list_runs() -> JSONResponse:
@@ -337,18 +378,25 @@ def create_app(settings: Settings | None = None, orchestrator: Orchestrator | No
         run = orch.get(run_id)
         if run and run.workspace:
             return run.workspace
-        path = Path(settings.workspace_dir) / "runs" / run_id
-        if not path.is_dir():
+        path = run_workspace_dir(settings.workspace_dir, run_id)
+        if path is None:
             return None
         try:
-            return WorkspaceGuard(path, data_dir=settings.data_dir, create=False)
+            return WorkspaceGuard(
+                path, data_dir=settings.data_dir, create=False, base=runs_root(settings.workspace_dir)
+            )
         except Exception:
             return None
 
     @api.get("/runs/{run_id}/files")
     async def run_files(run_id: str) -> JSONResponse:
         guard = _workspace(run_id)
-        return JSONResponse({"run_id": run_id, "files": guard.list_files() if guard else []})
+        if guard is None:
+            # An empty list would hide the difference between "this run wrote
+            # nothing" and "that is not a run id" — and the second one is an
+            # attempt to read somewhere it should not.
+            return JSONResponse({"error_tag": "BAD_REQUEST", "message": "unknown run"}, status_code=404)
+        return JSONResponse({"run_id": run_id, "files": guard.list_files()})
 
     @api.get("/runs/{run_id}/files/{file_path:path}")
     async def run_file(run_id: str, file_path: str):

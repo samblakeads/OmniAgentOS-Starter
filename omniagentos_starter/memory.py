@@ -16,6 +16,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from xml.sax.saxutils import escape as xml_escape
 
 from .config import MAX_LESSON_CHARS
 from .redact import redact
@@ -211,9 +212,12 @@ def lessons_prompt_block(lessons: list[Lesson]) -> str:
     """Verbatim lesson text, wrapped and fenced with the override prohibition."""
     if not lessons:
         return ""
+    # A lesson was written by a model, from text a user supplied. That makes it
+    # data, and data gets escaped — otherwise a lesson can close its own tag and
+    # the next run's planner reads the rest as instructions.
     body = "\n".join(
         f"lesson {lesson.id} (from run {lesson.run_id}):\n"
-        f"<recalled_lesson>{lesson.text}</recalled_lesson>"
+        f"<recalled_lesson>{xml_escape(lesson.text)}</recalled_lesson>"
         for lesson in lessons
     )
     return (

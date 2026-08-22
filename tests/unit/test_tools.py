@@ -81,12 +81,12 @@ def test_prefix_collision_is_not_containment(tmp_path):
 
 def test_repo_root_as_a_workspace_is_refused():
     with pytest.raises(WorkspaceRefused):
-        WorkspaceGuard(REPO_ROOT)
+        WorkspaceGuard(REPO_ROOT, data_dir=None)
 
 
 def test_package_dir_as_a_workspace_is_refused():
     with pytest.raises(WorkspaceRefused):
-        WorkspaceGuard(PACKAGE_DIR)
+        WorkspaceGuard(PACKAGE_DIR, data_dir=None)
 
 
 def test_data_dir_as_a_workspace_is_refused(tmp_path):
@@ -98,7 +98,7 @@ def test_data_dir_as_a_workspace_is_refused(tmp_path):
 
 def test_an_ancestor_of_the_repo_is_refused(tmp_path):
     with pytest.raises(WorkspaceRefused):
-        WorkspaceGuard(REPO_ROOT.parent)
+        WorkspaceGuard(REPO_ROOT.parent, data_dir=None)
 
 
 def test_a_symlinked_root_is_refused(tmp_path):
@@ -107,7 +107,7 @@ def test_a_symlinked_root_is_refused(tmp_path):
     link = tmp_path / "link"
     link.symlink_to(real, target_is_directory=True)
     with pytest.raises(WorkspaceRefused):
-        WorkspaceGuard(link)
+        WorkspaceGuard(link, data_dir=None)
 
 
 def test_oversize_writes_are_refused(guard):

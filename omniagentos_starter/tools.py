@@ -58,7 +58,13 @@ class WorkspaceGuard:
     a string prefix.
     """
 
-    def __init__(self, root: Path | str, data_dir: Path | str | None | _Unset = UNSET, create: bool = True):
+    def __init__(
+        self,
+        root: Path | str,
+        data_dir: Path | str | None | _Unset = UNSET,
+        create: bool = True,
+        base: Path | str | None = None,
+    ):
         # Fail closed on ignorance, not just on known-bad roots: a guard that was
         # never told where the database lives cannot promise not to write into it.
         # Pass data_dir=None to say explicitly "no data directory is in play".
@@ -78,6 +84,17 @@ class WorkspaceGuard:
             if bad.is_relative_to(resolved):
                 raise WorkspaceRefused(
                     f"refusing workspace root {resolved}: it contains {bad}"
+                )
+        if base is not None:
+            # Defence in depth. The guard polices what happens INSIDE its root,
+            # so a guard rooted at /etc is a perfectly obedient guard over /etc:
+            # containment is only as good as the root you hand it. Callers that
+            # know the tree their runs live in say so, and a root outside it —
+            # or the tree itself — is refused before anything is opened.
+            base_resolved = Path(base).expanduser().resolve()
+            if resolved == base_resolved or not resolved.is_relative_to(base_resolved):
+                raise WorkspaceRefused(
+                    f"refusing workspace root {resolved}: it is not a directory inside {base_resolved}"
                 )
         if create:
             resolved.mkdir(parents=True, exist_ok=True)
@@ -160,9 +177,24 @@ class ToolResult:
 TOOL_NAMES = ("read_file", "write_file", "list_files")
 
 
+def safe_run_id(run_id: str) -> str:
+    """The only characters a run id may contribute to a path.
+
+    Everything else is dropped rather than escaped, so no combination of dots,
+    slashes or encodings can survive into a filesystem path. An id that has
+    nothing left is not a run id.
+    """
+    return "".join(ch for ch in str(run_id or "") if ch.isalnum() or ch in "-_")[:64]
+
+
+def runs_root(workspace_dir: Path | str) -> Path:
+    return (Path(workspace_dir) / "runs").resolve()
+
+
 def workspace_for_run(workspace_dir: Path | str, run_id: str, data_dir: Path | str | None = None) -> WorkspaceGuard:
     """Default per-run root: ``./workspace/runs/<run_id>/``."""
-    safe_id = "".join(ch for ch in str(run_id) if ch.isalnum() or ch in "-_")[:64]
+    safe_id = safe_run_id(run_id)
     if not safe_id:
         raise WorkspaceRefused("run id has no safe characters")
-    return WorkspaceGuard(Path(workspace_dir) / "runs" / safe_id, data_dir=data_dir)
+    root = runs_root(workspace_dir)
+    return WorkspaceGuard(root / safe_id, data_dir=data_dir, base=root)
