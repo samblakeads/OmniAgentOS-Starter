@@ -16,6 +16,7 @@ from pathlib import Path
 
 from .config import replay_path
 from .engine import EventBus, RunState
+from .redact import redact
 
 SCHEMA = "omniagentos-replay-1"
 MAX_GAP_MS = 450
@@ -72,14 +73,24 @@ async def replay_into(
     run.started_ts = time.time()
     run.replay = True
     previous_offset = 0.0
+    terminal_seen = False
     for raw in events:
-        offset = float(raw.get("offset_ms") or 0)
+        # A recording is a file on disk; a file on disk is input. One malformed
+        # entry must degrade to ReplayUnavailable — which the caller already
+        # turns into a tagged run.failed — never to an AttributeError that kills
+        # the fallback the operator reached for because something else broke.
+        try:
+            if not isinstance(raw, dict):
+                raise TypeError("recorded event is not an object")
+            offset = float(raw.get("offset_ms") or 0)
+            payload = dict(raw.get("payload") or {})
+            etype = str(raw.get("type") or "note")
+        except (TypeError, ValueError, AttributeError) as exc:
+            raise ReplayUnavailable(f"recorded run is malformed: {type(exc).__name__}") from None
         gap = max(MIN_GAP_MS, min(MAX_GAP_MS, offset - previous_offset)) / max(0.05, speed)
         previous_offset = offset
         if bus.events:  # never delay the very first event: the stage clock is watching
             await sleep(gap / 1000.0)
-        payload = dict(raw.get("payload") or {})
-        etype = str(raw.get("type") or "note")
         if etype == "run.started":
             payload["replay"] = True
             payload["run_id"] = run.id
@@ -87,19 +98,51 @@ async def replay_into(
         elif etype in ("run.done", "run.failed"):
             payload["run_id"] = run.id
             payload["replay"] = True
-        bus.emit(etype, payload)
+        # The live paths redact at the call site; a re-recorded or hand-supplied
+        # tape has no call site, so it is redacted here before it reaches a
+        # browser. (EventBus.emit redacts too — this is the belt to that brace,
+        # and it is what makes `path=` safe for a tape we did not audit.)
+        bus.emit(etype, redact(payload))
         if etype == "run.done":
+            terminal_seen = True
             run.status = "done"
-            run.verified = True
+            # Never hard-code the verdict. A recording of a run that the verifier
+            # rejected must replay as rejected; a recording with no verdict at
+            # all is not a pass either.
+            run.verified = payload.get("verified") is True
             run.deliverable = str(payload.get("deliverable") or "")
-            run.rounds = int(payload.get("rounds") or 0)
+            run.rounds = _int_or(payload.get("rounds"), 0)
         elif etype == "run.failed":
+            terminal_seen = True
             run.status = "failed"
+            run.verified = False
             run.error_tag = str(payload.get("error_tag") or "INTERNAL_ERROR")
-    if run.status == "running":
-        # a recording that never terminated is still not left in limbo
-        run.status = "done"
-        bus.emit("run.done", {"run_id": run.id, "deliverable": run.deliverable, "replay": True, "rounds": run.rounds})
+    if not terminal_seen:
+        # A tape that stops in the middle is a broken tape. Promoting it to
+        # `done` with whatever deliverable happened to be there is exactly the
+        # favourable default this system refuses everywhere else.
+        run.status = "failed"
+        run.verified = False
+        run.error_tag = "REPLAY_TRUNCATED"
+        run.error_message = "the recorded run has no terminal event"
+        bus.emit(
+            "run.failed",
+            {
+                "run_id": run.id,
+                "error_tag": "REPLAY_TRUNCATED",
+                "message": run.error_message,
+                "replay": True,
+                "rounds": run.rounds,
+                "verified": False,
+            },
+        )
     run.finished_ts = time.time()
     bus.close()
     return run
+
+
+def _int_or(value, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default

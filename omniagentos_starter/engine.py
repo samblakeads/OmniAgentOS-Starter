@@ -720,6 +720,14 @@ class Engine:
             text = await self.llm.stream(
                 [{"role": "system", "content": system}, {"role": "user", "content": user}],
                 on_delta=lambda piece: self.bus.emit("worker.delta", {"task_id": task.id, "text": piece}),
+                # A retried stream re-sends the whole completion. Without this the
+                # dashboard shows attempt one welded to attempt two while the
+                # critic grades only attempt two.
+                on_reset=lambda reason: self.bus.emit(
+                    "worker.reset",
+                    {"task_id": task.id, "round": round_no, "reason": reason,
+                     "message": "the stream dropped; the deliverable is being written again"},
+                ),
                 role="worker",
                 # a repair is an edit, not a fresh draft: sample conservatively so a fix
                 # cannot wander off and lose a criterion the last round already passed
@@ -1055,6 +1063,11 @@ class Engine:
                 if verified:
                     run.verified = True
                     run.status = "done"
+                    # Persist the verdict BEFORE reflecting. The Reflector's lesson
+                    # is refused by memory unless the run row already says done and
+                    # verified — which is the point: the check has to read the same
+                    # record everyone else does, not the engine's word for it.
+                    self._persist_outcome("done", verified=True)
                     # Learn first, announce after: run.done is the terminal event of
                     # the stream, so a lesson emitted after it would never reach a
                     # client that (correctly) stops reading there.
@@ -1107,20 +1120,25 @@ class Engine:
             )
 
     # --------------------------------------------------------------- outcomes
+    def _persist_outcome(self, status: str, verified: bool, error_tag: str | None = None) -> None:
+        """Write the run's outcome to the database. Idempotent."""
+        self.memory.finish_run(
+            self.run.id,
+            status,
+            rounds=self.run.rounds,
+            llm_calls=self.budget.as_dict()["llm_calls"],
+            verified=verified,
+            error_tag=error_tag,
+            deliverable=self.run.deliverable,
+        )
+
     def _succeed(self) -> None:
         run = self.run
         run.status = "done"
         run.finished_ts = time.time()
         stats = self.budget.as_dict()
         files = run.workspace.list_files() if run.workspace else []
-        self.memory.finish_run(
-            run.id,
-            "done",
-            rounds=run.rounds,
-            llm_calls=stats["llm_calls"],
-            verified=True,
-            deliverable=run.deliverable,
-        )
+        self._persist_outcome("done", verified=True)
         self.bus.emit(
             "run.done",
             {
@@ -1141,15 +1159,7 @@ class Engine:
         run.error_message = message
         run.finished_ts = time.time()
         stats = self.budget.as_dict()
-        self.memory.finish_run(
-            run.id,
-            "failed",
-            rounds=run.rounds,
-            llm_calls=stats["llm_calls"],
-            verified=False,
-            error_tag=error_tag,
-            deliverable=run.deliverable,
-        )
+        self._persist_outcome("failed", verified=False, error_tag=error_tag)
         self.bus.emit(
             "run.failed",
             {

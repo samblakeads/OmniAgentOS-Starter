@@ -119,6 +119,14 @@ async def _run_goal(args) -> int:
             sys.stdout.write(payload.get("text", ""))
             sys.stdout.flush()
             printed[payload.get("task_id", "")] = True
+        elif etype == "worker.reset":
+            # The tokens already on this terminal belong to an attempt that died.
+            # Say so, rather than letting the next attempt concatenate onto them.
+            print(
+                f"\n[worker {payload.get('task_id')}] stream dropped "
+                f"({payload.get('reason')}) — restarting this deliverable\n",
+                file=sys.stderr,
+            )
         elif etype == "worker.started":
             print(f"\n[worker {payload.get('task_id')}] {payload.get('title', '')}", file=sys.stderr)
         elif etype in ("critic.verdict", "verifier.verdict"):
@@ -151,7 +159,17 @@ async def _run_goal(args) -> int:
         print(json.dumps(redact(run.summary()), indent=2, default=str))
     else:
         print(run.deliverable or f"run failed: {run.error_tag} {run.error_message}")
-    return 0 if run.status == "done" else 1
+    # `done` is not the same as `signed off`. A run the Verifier rejected can
+    # still reach a terminal state, and exiting 0 on it tells every supervisor
+    # and every "did the demo work?" script that it passed.
+    if run.status == "done" and run.verified is True:
+        return 0
+    print(
+        f"not verified: status={run.status} verified={run.verified} "
+        f"error_tag={run.error_tag or '-'}",
+        file=sys.stderr,
+    )
+    return 1
 
 
 async def _demo_headless(args) -> int:
@@ -168,7 +186,15 @@ async def _demo_headless(args) -> int:
             continue
         print(f"{event['id']:>3} {event['type']}")
     print("\n" + (run.deliverable or ""))
-    return 0
+    # A truncated or rejected recording is not a successful demonstration, and
+    # exit 0 was the only thing anything downstream looked at.
+    if run.status == "done" and run.verified is True:
+        return 0
+    print(
+        f"replay did not finish verified: status={run.status} error_tag={run.error_tag or '-'}",
+        file=sys.stderr,
+    )
+    return 1
 
 
 def main(argv: list[str] | None = None) -> int:
