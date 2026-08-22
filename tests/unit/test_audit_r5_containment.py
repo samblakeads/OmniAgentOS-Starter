@@ -9,14 +9,15 @@ root it was handed could be anything at all.
 
 from __future__ import annotations
 
+import errno
 import os
-import stat
 import tempfile
 from pathlib import Path
 
 import pytest
 from conftest import Script, make_orchestrator, provider_config
 
+from omniagentos_starter import tools as tools_module
 from omniagentos_starter.api import create_app
 from omniagentos_starter.config import ERROR_TAGS, Settings
 from omniagentos_starter.engine import execute_worker_tool
@@ -84,20 +85,44 @@ def test_a_legitimate_run_workspace_containing_a_runs_dir_is_not_locked_out(tmp_
 
 
 # ------------------------------------------------------------------ F6 (minor)
-def test_an_io_error_on_a_legal_path_is_not_reported_as_an_escape(tmp_path):
-    """A full disk is not an agent trying to leave the box."""
+@pytest.mark.parametrize(
+    ("label", "error"),
+    [
+        ("EACCES", PermissionError(errno.EACCES, "Permission denied")),
+        ("ENOSPC", OSError(errno.ENOSPC, "No space left on device")),
+        ("EROFS", OSError(errno.EROFS, "Read-only file system")),
+    ],
+)
+def test_an_io_error_on_a_legal_path_is_not_reported_as_an_escape(tmp_path, monkeypatch, label, error):
+    """A full disk is not an agent trying to leave the box.
+
+    The failure is INJECTED at the write primitive rather than simulated with
+    chmod. File permissions do not restrict writes the same way on Windows, so
+    the chmod version of this test simply succeeded there and asserted nothing —
+    CI caught it on windows-latest, which is exactly the platform a POSIX-shaped
+    assumption is most likely to be wrong on. Injecting the errno makes the test
+    say what it means on every platform: whatever the kernel refuses, a legal
+    path that could not be written is an IO error, not an escape attempt.
+    """
     root = runs_root(tmp_path / "workspace") / "abc123"
     root.mkdir(parents=True)
-    os.chmod(root, stat.S_IRUSR | stat.S_IXUSR)  # readable, not writable
-    try:
-        result = execute_worker_tool(str(root), "write_file", {"path": "n.txt", "content": "x"})
-    finally:
-        os.chmod(root, 0o755)
+    real_open = os.open
 
-    assert result["ok"] is False
-    assert result["error_tag"] == "WORKSPACE_IO_ERROR", result
+    def failing_open(path, flags, mode=0o777, **kwargs):
+        # Only our target fails. `tools.os` IS the global os module, so a fake
+        # that refused everything would also break pytest's own capture.
+        if str(path).endswith("n.txt"):
+            raise error
+        return real_open(path, flags, mode, **kwargs)
+
+    monkeypatch.setattr(tools_module.os, "open", failing_open)
+    result = execute_worker_tool(str(root), "write_file", {"path": "n.txt", "content": "x"})
+
+    assert result["ok"] is False, f"{label}: {result}"
+    assert result["error_tag"] == "WORKSPACE_IO_ERROR", f"{label}: {result}"
     assert result["error_tag"] != "WORKSPACE_ESCAPE"
     assert "WORKSPACE_IO_ERROR" in ERROR_TAGS
+    assert not (root / "n.txt").exists(), f"{label}: the write landed despite the error"
 
 
 def test_a_real_escape_still_reports_an_escape(tmp_path):
