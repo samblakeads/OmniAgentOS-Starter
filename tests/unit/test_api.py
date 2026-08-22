@@ -214,3 +214,80 @@ def test_the_demo_says_so_plainly_when_no_recording_is_bundled(settings, monkeyp
         refused = client.post("/api/demo")
     assert refused.status_code == 503
     assert refused.json()["error_tag"] == "PROVIDER_NOT_CONFIGURED"
+
+
+# ------------------------------------------------------- acceptance criteria
+def test_extra_dod_accepts_plain_strings(settings):
+    """What the dashboard posts."""
+    with build(settings) as client:
+        created = client.post(
+            "/api/runs",
+            json={"goal": GOAL, "extra_dod": ["Every headline is under 40 characters", "Mentions the price"]},
+        )
+        assert created.status_code == 201
+        run = client.app.state.orchestrator.get(created.json()["run_id"])
+    assert run.extra_dod == ["Every headline is under 40 characters", "Mentions the price"]
+
+
+def test_extra_dod_accepts_criterion_objects(settings):
+    """What the oracle posts — same meaning, different shape."""
+    with build(settings) as client:
+        created = client.post(
+            "/api/runs",
+            json={
+                "goal": GOAL,
+                "extra_dod": [
+                    {"criterion": "must contain the exact phrase 'PRODUCTION LINE' in caps"},
+                    {"id": "x9", "criterion": "under 60 words"},
+                ],
+            },
+        )
+        assert created.status_code == 201
+        run = client.app.state.orchestrator.get(created.json()["run_id"])
+    assert run.extra_dod == [
+        "must contain the exact phrase 'PRODUCTION LINE' in caps",
+        "under 60 words",
+    ]
+
+
+def test_extra_dod_accepts_the_two_shapes_mixed(settings):
+    with build(settings) as client:
+        created = client.post(
+            "/api/runs", json={"goal": GOAL, "extra_dod": ["a plain one", {"criterion": "an object one"}]}
+        )
+        assert created.status_code == 201
+        run = client.app.state.orchestrator.get(created.json()["run_id"])
+    assert run.extra_dod == ["a plain one", "an object one"]
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [[42], [None], [[]], [{}], [{"id": "x1"}], [""], ["   "], [{"criterion": ""}], [{"criterion": 7}]],
+)
+def test_a_criterion_that_is_not_a_criterion_is_refused_not_dropped(settings, bad):
+    """Silently dropping it would leave the user believing it is being enforced."""
+    with build(settings) as client:
+        refused = client.post("/api/runs", json={"goal": GOAL, "extra_dod": bad})
+    assert refused.status_code == 422, refused.text
+
+
+def test_operator_criteria_are_labelled_for_the_quality_gate(settings):
+    with build(settings) as client:
+        created = client.post("/api/runs", json={"goal": GOAL, "extra_dod": ["it rhymes"]})
+        run_id = created.json()["run_id"]
+        events = sse_events(client, run_id)
+    plan = next(e for e in events if e["type"] == "planner.plan")
+    operator = [c for c in plan["dod"] if c["source"] == "operator"]
+    assert [c["criterion"] for c in operator] == ["it rhymes"]
+
+
+def test_the_dashboard_offers_the_criteria_box_and_credits_it_to_you():
+    """The control the criteria are typed into, and how the gate attributes them."""
+    from omniagentos_starter.config import static_dir
+
+    index = (static_dir() / "index.html").read_text(encoding="utf-8")
+    app_js = (static_dir() / "app.js").read_text(encoding="utf-8")
+    assert 'data-testid="extra-dod-input"' in index
+    assert "Acceptance criteria (the Critic enforces these; the Worker doesn't see them)" in index
+    assert "extra_dod" in app_js
+    assert '"from you"' in app_js

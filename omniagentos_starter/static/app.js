@@ -134,7 +134,7 @@
           : '<span class="dod-state">○ pending</span>';
       var skill = state.skills[c.source];
       var source = c.source === "planner" ? "from planner"
-        : c.source === "operator" ? "from operator"
+        : c.source === "operator" ? "from you"
           : "from skill: " + esc(skill ? skill.name : c.source);
       return "<li>" + mark + esc(c.criterion) +
         '<span class="dod-source">' + source + " · " + esc(c.id) + "</span></li>";
@@ -416,14 +416,23 @@
     ["planner", "worker", "critic", "verifier", "deliverable"].forEach(function (l) { laneStatus(l, "○ idle", null); });
   }
 
+  function extraDod() {
+    var raw = el("extra-dod") ? el("extra-dod").value : "";
+    return raw.split("\n").map(function (line) { return line.trim(); })
+      .filter(function (line) { return line.length > 0; });
+  }
+
   function startRun() {
     var goal = el("goal").value.trim();
     if (!goal) { el("goal").focus(); return; }
     resetRun(goal);
+    var body = { goal: goal };
+    var criteria = extraDod();
+    if (criteria.length) { body.extra_dod = criteria; }
     fetch("/api/runs", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ goal: goal })
+      body: JSON.stringify(body)
     }).then(function (r) {
       return r.json().then(function (body) { return { ok: r.ok, status: r.status, body: body }; });
     }).then(function (res) {

@@ -51,6 +51,9 @@
   <section class="panel goal-panel">
     <label for="goal" class="label">Your goal</label>
     <textarea id="goal" data-testid="goal-input" rows="3" placeholder="Write exactly 3 ad headlines for an AI video tool, each under 40 characters, and explain in one line why each works"></textarea>
+    <label for="extra-dod" class="label label-sub">Acceptance criteria (the Critic enforces these; the Worker doesn't see them)</label>
+    <textarea id="extra-dod" data-testid="extra-dod-input" rows="2" class="sub-input"
+      placeholder="One per line — e.g. Every headline is under 40 characters"></textarea>
     <div class="goal-actions">
       <button id="run-button" data-testid="run-button" class="primary" type="button">Run</button>
       <button id="retry-button" class="secondary" type="button" hidden>Retry this goal</button>

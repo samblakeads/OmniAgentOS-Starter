@@ -78,6 +78,8 @@ textarea {
   width: 100%; background: var(--panel-2); color: var(--text); border: 1px solid var(--line);
   border-radius: 8px; padding: 12px; font-size: 16px; font-family: inherit; resize: vertical;
 }
+.label-sub { margin-top: 12px; }
+.sub-input { font-size: 16px; min-height: 52px; }
 .goal-actions { display: flex; align-items: center; gap: 12px; margin-top: 12px; flex-wrap: wrap; }
 .primary {
   background: var(--accent); color: #08121f; border: none; border-radius: 8px;

@@ -38,7 +38,15 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("goal")
     run.add_argument("--data-dir", default="var")
     run.add_argument("--max-rounds", type=int, default=None)
-    run.add_argument("--extra-dod", action="append", default=[], help="extra Definition-of-Done criterion")
+    run.add_argument(
+        "--dod",
+        dest="extra_dod",
+        action="append",
+        default=[],
+        metavar="CRITERION",
+        help="acceptance criterion the Critic enforces and the Worker never sees (repeatable)",
+    )
+    run.add_argument("--extra-dod", dest="extra_dod", action="append", help=argparse.SUPPRESS)
     run.add_argument("--json", action="store_true", help="print the run summary as JSON")
 
     demo = sub.add_parser("demo", help="replay a recorded run (no API key needed)")

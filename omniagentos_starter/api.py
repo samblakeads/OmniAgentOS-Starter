@@ -18,7 +18,7 @@ from pathlib import Path
 from fastapi import APIRouter, FastAPI, Header, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from .config import (
     MAX_EXTRA_DOD,
@@ -84,7 +84,14 @@ def git_head(root: Path | None = None) -> str:
 
 
 def criterion_text(item) -> str:
-    """Accept an extra_dod entry as a plain string or as {"criterion": "..."}."""
+    """One acceptance criterion, however the caller chose to phrase it.
+
+    A plain string, or an object with `criterion` (`text`/`requirement`/`dod`
+    also accepted, and an `id` alongside is ignored — the engine issues its own).
+    Anything else is not a criterion and is rejected rather than quietly dropped:
+    a criterion the user believes is being enforced, but isn't, is worse than an
+    error message.
+    """
     if isinstance(item, str):
         return item.strip()
     if isinstance(item, dict):
@@ -92,13 +99,24 @@ def criterion_text(item) -> str:
             value = item.get(key)
             if isinstance(value, str) and value.strip():
                 return value.strip()
-    return str(item or "").strip()
+    return ""
 
 
 class RunRequest(BaseModel):
     goal: str = Field(min_length=1, max_length=MAX_GOAL_CHARS)
     max_rounds: int | None = None
     extra_dod: list[str | dict] = Field(default_factory=list, max_length=MAX_EXTRA_DOD)
+
+    @field_validator("extra_dod")
+    @classmethod
+    def _every_entry_is_a_criterion(cls, value: list) -> list:
+        for item in value:
+            if not isinstance(item, (str, dict)) or not criterion_text(item):
+                raise ValueError(
+                    "each extra_dod entry must be a non-empty string or an object with a "
+                    f"non-empty 'criterion'; got {item!r}"
+                )
+        return value
 
     def criteria(self) -> list[str]:
         return [c for c in (criterion_text(x) for x in self.extra_dod) if c]
