@@ -357,7 +357,7 @@ async def test_a_declined_candidate_skill_leaves_no_criteria_behind(settings, tm
     (root / "video").mkdir(parents=True)
     (root / "marketing-content" / "ad-copy.md").write_text(
         "---\nname: Ad Copy\nslug: ad-copy\ncategory: marketing-content\n"
-        "summary: writes ad headlines for campaigns\n---\n\n## WHEN TO USE\nheadlines\n\n"
+        "summary: writes ad headlines and hooks for video campaigns\n---\n\n## WHEN TO USE\nheadlines\n\n"
         "## QUALITY CHECKS\n- Every headline is under the limit.\n",
         encoding="utf-8",
     )
@@ -383,7 +383,9 @@ async def test_a_declined_candidate_skill_leaves_no_criteria_behind(settings, tm
     sources = {c["source"] for c in payload_of(run, "planner.plan")["dod"]}
     assert "ad-copy" in sources
     assert "vsl-script" not in sources
-    assert payload_of(run, "skill.declined")["skill_ids"] == ["vsl-script"]
+    declined = payload_of(run, "skill.declined")["skill_ids"]
+    assert "vsl-script" in declined
+    assert "general-assistant" in declined, "the generalist is always on the bench, and is declined here"
     assert run.status == "done"
 
 

@@ -44,7 +44,7 @@ from .config import (
 from .llm import Budget, LLMClient
 from .memory import LESSON_PROHIBITION, Memory, lessons_prompt_block
 from .redact import ProviderError, WorkspaceEscape, redact
-from .skills import SkillLibrary, SkillPack, load_skills
+from .skills import SkillLibrary, SkillPack, builtin_pack, load_skills
 from .tools import WorkspaceGuard, workspace_for_run
 
 ROLES = ("planner", "worker", "critic", "verifier")
@@ -246,6 +246,7 @@ class Engine:
         self.criterion_task: dict[str, str] = {}
         self.last_verdicts: dict[str, bool] = {}
         self.selected: list[SkillPack] = []
+        self.assignable: list[SkillPack] = []
         self.lessons: list = []
         self.lesson_block = ""
 
@@ -264,7 +265,7 @@ class Engine:
 
     # ---------------------------------------------------------------- prompts
     def _skill_blocks(self) -> str:
-        return "\n".join(p.prompt_block() for p in self.selected)
+        return "\n".join(p.prompt_block() for p in self.assignable)
 
     def _dod_block(self, criteria: list[Criterion] | None = None) -> str:
         criteria = criteria if criteria is not None else self.dod
@@ -336,6 +337,13 @@ class Engine:
     async def _select_skills(self) -> None:
         packs, scores, fallback = self.library.select(self.run.goal, k=2)
         self.selected = packs
+        # The generalist is always on the bench. Without it the planner must assign a
+        # specialised pack even when none fits, and that pack's QUALITY CHECKS become
+        # criteria the goal can never satisfy.
+        general = builtin_pack()
+        self.assignable = list(packs)
+        if all(p.slug != general.slug for p in packs):
+            self.assignable.append(general)
         self.run.skills = [p.slug for p in packs]
         if fallback:
             self.bus.emit(
@@ -362,7 +370,7 @@ class Engine:
         return seeded
 
     async def _plan(self) -> None:
-        candidates = self._seed_from(self.selected)
+        candidates = self._seed_from(self.assignable)
 
         system = (
             "You are the PLANNER agent in OmniAgentOS Starter, an agent operating system. "
@@ -428,8 +436,8 @@ class Engine:
         if len(raw_tasks) > MAX_PLAN_TASKS:
             pruned["tasks_dropped"] = len(raw_tasks) - MAX_PLAN_TASKS
             raw_tasks = raw_tasks[:MAX_PLAN_TASKS]
-        valid_skills = {p.slug for p in self.selected}
-        default_skill = self.selected[0].slug if self.selected else ""
+        valid_skills = {p.slug for p in self.assignable}
+        default_skill = self.assignable[0].slug if self.assignable else ""
         for i, raw in enumerate(raw_tasks, start=1):
             tid = str(raw.get("id") or f"t{i}").strip()[:24] or f"t{i}"
             skill_id = str(raw.get("skill_id") or "").strip()
@@ -452,8 +460,8 @@ class Engine:
         # planner declined must not leave its standards behind as criteria the
         # deliverable can never satisfy — that is a run doomed before it starts.
         used = {t.skill_id for t in self.tasks.values()}
-        seeded = self._seed_from([p for p in self.selected if p.slug in used])
-        declined = sorted({p.slug for p in self.selected} - used)
+        seeded = self._seed_from([p for p in self.assignable if p.slug in used])
+        declined = sorted({p.slug for p in self.assignable} - used)
 
         dod = operator + seeded + added
         if len(dod) > MAX_DOD_CRITERIA:
@@ -521,7 +529,7 @@ class Engine:
 
     async def _run_worker(self, task: Task, round_no: int, sem: asyncio.Semaphore) -> None:
         async with sem:
-            pack = self.library.by_id(task.skill_id) or (self.selected[0] if self.selected else None)
+            pack = self.library.by_id(task.skill_id) or (self.assignable[0] if self.assignable else None)
             self.bus.emit(
                 "worker.started",
                 {"task_id": task.id, "title": task.title, "skill_id": task.skill_id, "round": round_no},

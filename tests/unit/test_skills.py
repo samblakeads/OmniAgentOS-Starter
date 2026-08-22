@@ -121,3 +121,25 @@ def test_the_builtin_pack_is_a_valid_pack_with_quality_checks():
 def test_the_prompt_block_carries_the_body_hash():
     pack = builtin_pack()
     assert f"skill-sha256:{pack.sha256}" in pack.prompt_block()
+
+
+def test_a_single_incidental_token_is_not_a_match(tmp_path):
+    """A pack must clear a floor, not merely score above zero.
+
+    Regression from a live run: a cold-email pack matched a goal about agent
+    orchestration on one shared word, and its "exactly one CTA per email body"
+    check then became a criterion the deliverable could never satisfy.
+    """
+    write_pack(tmp_path, "marketing-content", "ad-copy-writer")
+    (tmp_path / "lead-generation").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "lead-generation" / "cold-email.md").write_text(
+        "---\nname: Cold Email Sequence\nslug: cold-email\ncategory: lead-generation\n"
+        "summary: writes multi-step cold outreach email sequences for headlines lists\n---\n\n"
+        "## WHEN TO USE\ncold outreach\n\n## QUALITY CHECKS\n- Exactly one CTA per email body.\n",
+        encoding="utf-8",
+    )
+    lib = load_skills(tmp_path)
+    packs, scores, fallback = lib.select("Write 3 ad headlines with a character limit for a marketing content push")
+    assert [p.slug for p in packs] == ["ad-copy-writer"]
+    assert all(s["skill_id"] != "cold-email" for s in scores)
+    assert fallback is False

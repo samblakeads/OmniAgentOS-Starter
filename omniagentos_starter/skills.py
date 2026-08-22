@@ -218,9 +218,20 @@ class SkillLibrary:
         return scored
 
     def select(self, goal: str, k: int = 2) -> tuple[list[SkillPack], list[dict], bool]:
-        """Deterministic keyword selection. Returns (packs, scores, fallback_used)."""
+        """Deterministic keyword selection. Returns (packs, scores, fallback_used).
+
+        A single incidental token in common is not a match: a pack must score at
+        least 1 and at least half of the best score to be offered. Observed live,
+        a cold-email pack scored on one shared word against a goal about agent
+        orchestration, and its "exactly one CTA per email body" check then became
+        a criterion the deliverable could never satisfy.
+        """
         scored = self.score(goal)
-        top = [(p, s) for p, s in scored if s > 0][:k]
+        hits = [(p, s) for p, s in scored if s > 0]
+        if hits:
+            floor = max(1.0, hits[0][1] / 2)
+            hits = [(p, s) for p, s in hits if s >= floor]
+        top = hits[:k]
         if not top:
             fallback = self.builtin or builtin_pack()
             return [fallback], [{"skill_id": fallback.slug, "score": 0.0}], True
