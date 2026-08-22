@@ -41,7 +41,7 @@ package, not here — it works even if this whole folder is empty.
 |---|---|
 | lead-generation | cold-email-sequence-builder |
 | sales | proposal-generator |
-| customer-support | onboarding-welcome-sequence |
+| customer-support | refund-request-handler |
 | marketing-content | ad-copy-framework-writer |
 | creative-production | vsl-script-builder |
 | operations-admin | meeting-agenda-builder |

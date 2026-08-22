@@ -57,9 +57,13 @@ export OPENROUTER_API_KEY=... # or OpenRouter, checked second
 export OPENAI_API_KEY=...     # or OpenAI, checked third
 ```
 
-No key yet? `omniagentos demo` replays a real, recorded run at paced speed —
-every lane, every event, the full loop — so you can see exactly what it does
-before you spend a cent.
+No key yet? `./start.sh` still opens the dashboard — with no key configured
+it shows a first-run panel with a **Replay demo** control that replays a
+real, recorded run at paced speed on that same server: every lane, every
+event, the full loop, so you can see exactly what it does before you spend a
+cent. (The standalone `omniagentos demo` CLI command does the same thing
+without a browser, but it starts its own server — don't run it while
+`./start.sh` is already serving on the same port, they'll collide.)
 
 ## What you get
 
@@ -92,16 +96,32 @@ hard-coded list.
 
 ## White-label
 
-Running this under your own brand doesn't require a fork:
+Running this under your own brand doesn't require a fork. `OMNIAGENTOS_BRAND_LOGO`
+is put directly into the dashboard's `<img src>`, so it must be something the
+**browser** can fetch, not a bare filesystem path — a plain path like
+`/path/to/your-logo.png` will 404 in the browser (the server only serves
+`/assets/*`, rooted at the `assets/` directory, not the filesystem root).
+Two forms actually work:
 
 ```bash
+# 1. A real URL (simplest — works from anywhere, no file to place):
 export OMNIAGENTOS_BRAND_NAME="Your Brand"
-export OMNIAGENTOS_BRAND_LOGO=/path/to/your-logo.png
+export OMNIAGENTOS_BRAND_LOGO="https://your-cdn.example.com/your-logo.png"
+
+# 2. A local file served by this app: copy it into assets/ first, then
+#    reference the /assets/ URL the server actually serves (not the
+#    filesystem path you copied it from):
+cp /path/to/your-logo.png assets/your-logo.png
+export OMNIAGENTOS_BRAND_NAME="Your Brand"
+export OMNIAGENTOS_BRAND_LOGO="/assets/your-logo.png"
 ```
 
-The dashboard header and `GET /api/health` pick these up automatically. See
-`assets/TRADEMARK.md` — the OmniRogue name and logo are not licensed under
-this project's MIT license.
+Brand is resolved once at process start — set the env vars **before** you run
+`./start.sh` (or `start.ps1`); refreshing the browser on an already-running
+server picks up neither a new name nor a new logo, only a restart does. The
+dashboard header and `GET /api/health` reflect whatever was resolved at
+startup. See `assets/TRADEMARK.md` — the OmniRogue name and logo are not
+licensed under this project's MIT license.
 
 ## Security
 

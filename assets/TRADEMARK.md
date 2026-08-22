@@ -10,11 +10,15 @@ your own branding. Instead, set:
 
 ```
 OMNIAGENTOS_BRAND_NAME=<your brand name>
-OMNIAGENTOS_BRAND_LOGO=<path to your own logo>
+OMNIAGENTOS_BRAND_LOGO=<a URL, or /assets/<file> after copying the file into assets/>
 ```
 
-before starting the server, and the dashboard header (and `GET /api/health`
-`brand` field) will use your values instead of the OmniRogue defaults.
+`OMNIAGENTOS_BRAND_LOGO` goes straight into the dashboard's `<img src>`, so it
+must be something the browser can fetch — a bare filesystem path will 404.
+See the README's White-label section for the two forms that actually work.
+Set these **before** starting the server (`./start.sh` / `start.ps1`); brand
+is resolved once at startup, so a browser refresh alone will not pick up a
+change, only a restart will.
 
 Questions about using the OmniRogue name or logo itself — e.g. in a fork's
 own README or marketing — go to OmniRogue Inc, not this repository's issue

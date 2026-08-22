@@ -31,8 +31,12 @@ Draft a 5-email onboarding sequence for OmniAgentOS Starter and save each email 
       should come up in under 5 seconds.
 - [ ] One throwaway test run has already been done end-to-end today, so you
       know the provider is actually answering right now.
-- [ ] `omniagentos demo` has been test-run as the fallback path — if the
-      provider hiccups live, you switch to this without missing a beat.
+- [ ] The dashboard's **Replay demo** control (next to Run) has been
+      test-clicked once on the already-running stage server — that is the
+      fallback if the provider hiccups live, not a second `omniagentos demo`
+      process (that starts its own server on the same default port and
+      collides with the one already running the show — see the Recovery
+      beats below).
 - [ ] Browser zoom is up (this is a stage, not a laptop) and the dashboard
       tab is already open at `http://127.0.0.1:8486`.
 - [ ] Remember: workspace file links open in a NEW TAB (`target=_blank`) —
@@ -100,10 +104,13 @@ specific policy clause for the decision.
 ```
 
 **What the audience sees:** deliverable panel types out a reply that
-explicitly cites "after 30 days, no refunds" — not a generic apology. The
-quality-gate checklist shows the "from skill: Onboarding Welcome Sequence /
-customer-support" attribution line so the audience can see which skill's
-standards graded this output.
+explicitly cites the 30-day policy clause — not a generic apology. The
+quality-gate checklist shows the "from skill: Refund Request Handler /
+customer-support" attribution line, and its checks are the real reason the
+citation is mandatory: that pack's QUALITY CHECKS require a decision of
+Approved/Denied/Escalate, a cited policy clause on any denial, and a
+correct days-since-purchase calculation — so the audience is watching the
+actual gate, not a narrated one.
 
 **What you say:** "It's not guessing at policy — it's grounded on the exact
 text I gave it, and it has to cite the clause it used. That's the
@@ -138,12 +145,24 @@ this agent does can touch anything outside it."
 
 ## White-label swap beat (do this between goals, or at the end)
 
+Brand is resolved once at server startup, not on refresh, and
+`OMNIAGENTOS_BRAND_LOGO` must be something the browser can fetch (a URL, or
+a file already copied into `assets/`) — a bare filesystem path 404s. Prep
+the logo file into `assets/` *before* you're on stage, then to do this beat
+live: stop the running server (Ctrl+C in its terminal), restart with the
+brand env set, and reload the page — do not start a second server on the
+same port while the first is still up.
+
 ```bash
-OMNIAGENTOS_BRAND_NAME="Acme Inc" OMNIAGENTOS_BRAND_LOGO=/path/to/acme-logo.png ./start.sh
+# one-time prep, before you're live:
+cp /path/to/acme-logo.png assets/acme-logo.png
+
+# on stage: Ctrl+C the running server first, then:
+OMNIAGENTOS_BRAND_NAME="Acme Inc" OMNIAGENTOS_BRAND_LOGO="/assets/acme-logo.png" ./start.sh
 ```
 
-Refresh the dashboard — header logo and name change instantly, no rebuild,
-no fork.
+Reload the dashboard — header logo and name have changed, no rebuild, no
+fork. (It's a restart, not a live refresh — say so if asked.)
 
 **What you say:** "Same engine, your brand — this is what a client sees if
 you're running this white-labeled for them."
@@ -153,14 +172,22 @@ you're running this white-labeled for them."
 ## Recovery beats (rehearse these — they will happen eventually)
 
 - **Provider hiccup mid-demo** (timeout, 5xx, rate limit): don't stall —
-  say "let's not burn stage time waiting on a network blip" and run
-  `omniagentos demo` in a second terminal/tab. It replays a real recorded
-  run at the same paced speed, so the audience sees the identical loop
-  without waiting on a live model.
+  say "let's not burn stage time waiting on a network blip" and click
+  **Replay demo** (next to Run) on the dashboard that's already up. It
+  replays a real recorded run at the same paced speed on the SAME server,
+  so the audience sees the identical loop without waiting on a live model
+  and without touching a terminal.
+  **Do not** run `omniagentos demo` as a separate command here — it starts
+  its own `serve` on the same default port (8486) the stage server is
+  already using and will fail to bind. That command is for rehearsing the
+  replay beforehand or for the "nothing loads at all" case below, never for
+  a mid-show recovery while the real server is up.
 - **A run ends `run.failed`**: the error banner will show the specific
   `error_tag` (not a generic "something went wrong"). Point at it, then hit
   **Retry this goal** — the button is right there on the failed run, no
   retyping.
-- **Nothing loads / server not responding**: switch to the pre-recorded
-  fallback the same way as the provider hiccup — `omniagentos demo` needs
-  no key and no network.
+- **Nothing loads / server not responding** (the whole process died, not
+  just the provider): this is the one case where a fresh `omniagentos demo`
+  process is the right call — the crashed server has released its port, so
+  there's no collision. Run it in a terminal; it needs no key and no
+  network and replays the same recorded run standalone.
