@@ -3,12 +3,9 @@
 from __future__ import annotations
 
 import hashlib
-import json
 
 import httpx
-
 from _harness import (
-    REPO_ROOT,
     collect_sse,
     event_payload,
     event_type,
@@ -84,7 +81,6 @@ def test_d09_three_demo_goals_bijection_and_loop():
 
             t_first = None
             t_done = None
-            started = None
             for rec in events:
                 ts = event_payload(rec).get("ts")
                 if ts is None:

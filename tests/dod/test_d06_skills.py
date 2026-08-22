@@ -11,7 +11,6 @@ from pathlib import Path
 
 import httpx
 import yaml
-
 from _harness import (
     REPO_ROOT,
     collect_sse,
@@ -82,7 +81,6 @@ def _parse_valid(path: Path) -> dict | None:
     slug = path.stem
     if not slug:
         return None
-    rel = path.relative_to(path.parents[1] if path.parent.name != "_builtin" else path.parents[1])
     category = path.parent.name
     return {
         "slug": slug,

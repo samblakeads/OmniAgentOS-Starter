@@ -1,0 +1,29 @@
+# gitleaks config for OmniAgentOS Starter.
+#
+# Extends the default gitleaks ruleset and allowlists exactly the planted
+# fake API keys used by the D10 (invariants/redaction) DoD oracle and its
+# supporting docs. These are deliberately fake test fixtures — never real
+# credentials — used to prove that a leaked key never reaches SSE, logs, or
+# API responses (see tests/dod/test_d10_invariants.py and
+# tests/unit/test_redact.py). Scoped narrowly to the fixture paths so a real
+# secret accidentally committed anywhere else in the tree is still caught.
+#
+# Planted fixtures covered here:
+#   - tests/dod/_harness.py:            PLANTED_D10_KEY = "secret_TESTKEY_d10_7f3a9c2e"
+#   - tests/dod/test_d10_invariants.py: uses PLANTED_D10_KEY
+#   - tests/unit/test_redact.py:        fake keys like "xai-live-key-9876543210"
+#   - tests/unit/conftest.py:           TEST_KEY = "xai-unit-test-key-abcdef0123456789"
+#   - devtasks/**/BOUNDARIES.md, evidence/*: document the same planted key
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Planted fake keys in the D10 DoD oracle test fixtures and their docs — never real credentials."
+paths = [
+  '''tests/dod/_harness\.py''',
+  '''tests/dod/test_d10_invariants\.py''',
+  '''tests/unit/test_redact\.py''',
+  '''tests/unit/conftest\.py''',
+  '''devtasks/.*''',
+]

@@ -6,16 +6,15 @@ import time
 
 import httpx
 import pytest
-
 from _harness import (
     PLACEHOLDER_DELIVERABLES,
     collect_sse,
     event_payload,
     event_type,
-    evidence_path,
     events_of,
-    logo_png,
+    evidence_path,
     live_xai_base_url_ok,
+    logo_png,
     require_live,
     sha256_bytes,
     spawn_serve,

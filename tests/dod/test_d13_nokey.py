@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import httpx
 import pytest
-
 from _harness import (
     collect_sse,
     event_type,

@@ -8,7 +8,6 @@ from pathlib import Path
 from _harness import (
     collect_sse,
     event_payload,
-    event_type,
     events_of,
     live_xai_base_url_ok,
     load_prompts,

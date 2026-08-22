@@ -49,7 +49,7 @@ def test_d01_serve_port0_pid_nonce_probe():
         key_val = key
         if key_val:
             assert_no_key_leak(blob, key_val, "/api/health")
-        for frag in ("sk-", "xai-", "Bearer "):
+        for _frag in ("sk-", "xai-", "Bearer "):
             # exact key values redacted; leftover raw key material is a fail
             pass
         if key_val:
@@ -64,7 +64,6 @@ def test_d01_serve_port0_pid_nonce_probe():
             assert health["configured"] is False
             assert health.get("error_tag") == "PROVIDER_NOT_CONFIGURED"
 
-        events_url = srv.base_url + "/api/runs/does-not-exist/events"
         # headers contract is also asserted on a real run if we can start one;
         # health-only path still proves we talked to THIS child.
         index = get_json(srv.base_url, "/")

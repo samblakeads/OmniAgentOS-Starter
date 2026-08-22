@@ -63,8 +63,6 @@ def test_d04_extra_dod_forces_repair_then_verify():
             },
         )
 
-        types_in_order = [event_type(e) for e in events]
-
         critic_fail_i = None
         for i, rec in enumerate(events):
             if event_type(rec) != "critic.verdict":

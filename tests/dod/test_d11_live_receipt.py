@@ -29,7 +29,6 @@ def test_d11_receipt_schema_and_git_head():
     assert live_xai_base_url_ok()
 
     drill = REPO_ROOT / "scripts" / "drill.py"
-    smoke = REPO_ROOT / "scripts" / "smoke.sh"
     receipt_path = REPO_ROOT / "devtasks" / "gomax-omniagentos-lite-0821" / "evidence" / "d11-receipt.json"
     receipt_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -65,6 +64,7 @@ def test_d11_receipt_schema_and_git_head():
         srv = spawn_serve()
         try:
             import hashlib
+
             import httpx
 
             goal = "Write two sentences on orchestration vs a chatbox."
@@ -76,8 +76,6 @@ def test_d11_receipt_schema_and_git_head():
                 done = events_of(events, "run.done")
                 deliverable = event_payload(done[-1]).get("deliverable") or "" if done else ""
             health = httpx.get(srv.base_url + "/api/health", timeout=10).json()
-            t0 = event_payload(events[0]).get("ts") if events else 0
-            tN = event_payload(events[-1]).get("ts") if events else 0
             receipt = {
                 "magic": "OMNIAGENTOS-RECEIPT-1",
                 "git_head": repo_head_sha(),

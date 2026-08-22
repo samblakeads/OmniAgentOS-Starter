@@ -6,9 +6,7 @@ import os
 import tempfile
 from pathlib import Path
 
-import httpx
 import pytest
-
 from _harness import (
     PLANTED_D10_KEY,
     REPO_ROOT,

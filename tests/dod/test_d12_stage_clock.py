@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from _harness import (
     collect_sse,
-    event_payload,
     event_type,
     live_xai_base_url_ok,
     parse_demo_goals,
@@ -26,7 +25,6 @@ def test_d12_demo_goals_clock_from_sse():
         for i, goal in enumerate(goals, 1):
             import time
 
-            t_spawn_ms_origin = time.time()
             rid = start_run(srv.base_url, goal)
             post_at = time.time()
             events = collect_sse(srv.base_url, rid, timeout_s=150.0)
