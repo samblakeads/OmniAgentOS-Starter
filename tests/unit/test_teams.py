@@ -85,7 +85,7 @@ def test_a_team_survives_the_file_round_trip(tmp_path):
         ({"solo": ["solo"]}, "solo", "cannot delegate to itself"),
         ({"a": ["b"], "b": ["a"]}, "a", "cycle"),
         ({"boss": ["ghost"]}, "boss", "not in the roster"),
-        ({"l3": ["l2"], "l2": ["l1"], "l1": ["worker"], "worker": []}, "l3", "deep"),
+        ({"l2": ["l1"], "l1": ["worker"], "worker": []}, "l2", "deep"),
     ],
 )
 def test_a_broken_hierarchy_disables_the_agent_and_never_crashes(tmp_path, files, slug, fragment):
@@ -103,15 +103,24 @@ def test_a_broken_hierarchy_disables_the_agent_and_never_crashes(tmp_path, files
     assert roster.usable(slug) is None
 
 
-def test_a_two_deep_hierarchy_is_allowed(tmp_path):
+def test_a_manager_over_plain_members_is_the_allowed_shape(tmp_path):
+    """MAX_TEAM_DEPTH counts AGENT LEVELS, manager included.
+
+    2 is a manager over members. 3 — a manager over a manager over a member — is
+    refused, so a delegation chain stays something an operator can hold in their
+    head and a run's provenance stays explainable.
+    """
     root = tmp_path / "agents"
     root.mkdir(parents=True)
     for name, team in (("worker", []), ("lead", ["worker"]), ("head", ["lead"])):
         line = f"team: [{', '.join(team)}]\n" if team else ""
         (root / f"{name}.md").write_text(f"---\nname: {name.title()}\n{line}---\nbody\n", encoding="utf-8")
     roster = load_agents(root)
-    assert roster.by_id("head").enabled is True, f"depth {MAX_TEAM_DEPTH} must be allowed"
-    assert roster.by_id("lead").enabled is True
+    assert MAX_TEAM_DEPTH == 2
+    assert roster.by_id("lead").enabled is True, "manager over a plain member is 2 levels"
+    head = roster.by_id("head")
+    assert head.enabled is False, "manager over a manager is 3 levels"
+    assert any("deep" in e for e in head.errors), head.errors
 
 
 def test_a_manager_whose_member_is_disabled_is_disabled_too(tmp_path):
@@ -151,11 +160,11 @@ def test_a_team_that_would_be_too_deep_is_refused_at_write(tmp_path):
     root = _roster(tmp_path, [WRITER], library)
     store = AgentStore(root)
     store.create({"name": "Lead", "team": ["nils"]}, library=library, roster=load_agents(root))
-    store.create({"name": "Head", "team": ["lead"]}, library=library, roster=load_agents(root))
     with pytest.raises(AgentError) as exc:
-        store.create({"name": "Chief", "team": ["head"]}, library=library, roster=load_agents(root))
+        store.create({"name": "Head", "team": ["lead"]}, library=library, roster=load_agents(root))
     assert exc.value.status == 400
     assert "deep" in exc.value.message
+    assert not (root / "head.md").exists()
 
 
 # ------------------------------------------------------------- delegation
@@ -359,6 +368,9 @@ INDEX = (REPO_ROOT / "omniagentos_starter" / "static" / "index.html").read_text(
 
 def test_the_roster_card_names_who_a_manager_manages():
     render = APP_JS.split("function renderAgents()")[1].split("function fillAgentPicker()")[0]
+    # the oracle binds to this hook on the CARD; the form's checkboxes are
+    # agent-team-choices so the two cannot be confused
+    assert 'data-testid="agent-team"' in render
     assert "team_members" in render
     assert "manages" in render
     assert "m.name" in render, "names, not ids"
@@ -374,7 +386,7 @@ def test_the_run_view_shows_the_delegation():
 
 
 def test_the_form_can_build_a_team_without_offering_self():
-    assert 'data-testid="agent-team"' in INDEX
+    assert 'data-testid="agent-team-choices"' in INDEX
     form = APP_JS.split("function openAgentForm(")[1].split("function closeAgentForm")[0]
     assert "agent-team" in form
     assert "a.id !== editing" in form, "an agent must not be offered as its own member"

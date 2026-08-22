@@ -1148,6 +1148,16 @@ class Engine:
                 # a repair is an edit, not a fresh draft: sample conservatively so a fix
                 # cannot wander off and lose a criterion the last round already passed
                 temperature=0.2 if task.fix_notes else 0.4,
+                # Every worker line in the transcript names the task it belongs
+                # to. Without it, "this member's persona is in the transcript"
+                # proves the text arrived SOMEWHERE, not that it framed the task
+                # that member was delegated — which is the whole claim.
+                extra={
+                    "task_id": task.id,
+                    "member": task.member,
+                    "agent_id": executor.slug if executor else "",
+                    "round": round_no,
+                },
             )
             if task.artifact:
                 task.history.append(task.artifact)

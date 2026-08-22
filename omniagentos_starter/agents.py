@@ -41,10 +41,10 @@ MAX_NAME_CHARS = 80
 MAX_TITLE_CHARS = 120
 MAX_AGENT_SKILLS = 8
 MAX_TEAM_MEMBERS = 8
-# A manager may manage managers, but not managers-of-managers. Depth 1 is a
-# manager over plain members; depth 2 is a manager over a manager over plain
-# members. Beyond that the delegation chain stops being something an operator
-# can hold in their head, and a run's provenance stops being explainable.
+# How many LEVELS OF AGENTS a delegation chain may have, counting the manager
+# itself. 2 is a manager over plain members. 3 — a manager over a manager over a
+# member — is refused: past that the chain stops being something an operator can
+# hold in their head, and a run's provenance stops being explainable.
 MAX_TEAM_DEPTH = 2
 MAX_SLUG_LEN = 64
 BUILTIN_AGENT_SLUG = "general-worker"
@@ -578,10 +578,10 @@ def _validate_hierarchy(roster: AgentRoster) -> None:
         result = depth(agent.slug, ())
         if isinstance(result, str):
             disable(agent, result)
-        elif result > MAX_TEAM_DEPTH:
+        elif result + 1 > MAX_TEAM_DEPTH:
             disable(
                 agent,
-                f"delegation chain is {result} deep; the limit is {MAX_TEAM_DEPTH} "
+                f"delegation chain is {result + 1} agents deep; the limit is {MAX_TEAM_DEPTH} "
                 "so a run's provenance stays explainable",
             )
 
@@ -902,11 +902,11 @@ class AgentStore:
                 return 0
             return max(walk(m, (*seen, slug)) for m in member.team) + 1
 
-        depth = walk(agent.slug, ())
+        depth = walk(agent.slug, ()) + 1
         if depth > MAX_TEAM_DEPTH:
             raise AgentError(
                 "BAD_REQUEST",
-                f"that team is {depth} levels deep; the limit is {MAX_TEAM_DEPTH}",
+                f"that team is {depth} agents deep; the limit is {MAX_TEAM_DEPTH}",
             )
 
     @staticmethod

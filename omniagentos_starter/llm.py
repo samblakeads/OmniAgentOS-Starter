@@ -323,6 +323,7 @@ class LLMClient:
         role: str = "agent",
         model: str | None = None,
         max_tokens: int | None = None,
+        extra: dict | None = None,
     ) -> dict:
         """Structured call. One repair retry when the reply will not parse."""
         msgs = list(messages)
@@ -361,7 +362,10 @@ class LLMClient:
                     "PROVIDER_BAD_RESPONSE", 200, f"model did not return parseable JSON: {second_error}"
                 ) from None
         self._transcript(
-            {"role": role, "kind": "json", "messages": msgs, "response": content, "response_id": response_id}
+            {
+                "role": role, "kind": "json", "messages": msgs,
+                "response": content, "response_id": response_id, **(extra or {}),
+            }
         )
         return parsed
 
@@ -373,6 +377,7 @@ class LLMClient:
         model: str | None = None,
         temperature: float = 0.4,
         on_reset: Callable[[str], Any] | None = None,
+        extra: dict | None = None,
     ) -> str:
         """Streaming call. Deltas are handed to `on_delta` as they arrive.
 
@@ -493,6 +498,7 @@ class LLMClient:
                         "messages": list(messages),
                         "response": text,
                         "response_id": response_id,
+                        **(extra or {}),
                     }
                 )
                 return text

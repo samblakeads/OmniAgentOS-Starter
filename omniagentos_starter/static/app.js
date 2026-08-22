@@ -230,7 +230,7 @@
       // A manager is shown by WHO it manages, by name. A list of slugs is a
       // database table, not a team.
       var team = (a.team_members || []).length
-        ? '<div class="agent-meta agent-team">👥 manages ' +
+        ? '<div class="agent-meta agent-team" data-testid="agent-team">👥 manages ' +
           (a.team_members || []).map(function (m) { return esc(m.name || m.id); }).join(", ") +
           "</div>"
         : "";
