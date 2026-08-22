@@ -100,21 +100,29 @@ hard-coded list.
 
 An agent is a persistent, named identity you hand goals to — a file at
 `agents/<slug>.md`: a name, a title, a short persona, a list of skills it's
-allowed to draw on, and the tools it can use. Create one from the dashboard's
-**Agents** section (or drop a file in yourself, same directory-scan loader as
-`skills/`), then hand it a goal from the goal box's **Assign to** picker, or
-by starting the goal text with `@<slug>`. Its Worker prompt becomes that
-persona plus its own skills; its memory is scoped to it, separate from every
-other agent's. Omit `tools:` and an agent gets the full allow-list
-(`read_file`, `write_file`, `list_files` — there's no shell tool to grant);
-set `tools: []` for none, or list a subset — an agent's tools can only ever
-be *narrower* than the global allow-list, never wider (a wider list is
-rejected). A name is refused outright if it contains `/`, `\`, `..`, or a
-NUL byte, never silently reduced to a sanitized slug. Leave a goal
+allowed to draw on, and the tools it can use. Click **Agents** in the header
+(scrolls to the section, no page load) to create one from the dashboard —
+or drop a file in yourself, same directory-scan loader as `skills/` — then
+hand it a goal from the goal box's **Assign to** picker, or by starting the
+goal text with `@<slug>`. A picker choice always wins over an `@mention`;
+either way, the line under the goal box confirms who the run will execute
+as before you press Run. An `@mention` that doesn't resolve to a real (or
+enabled) agent is refused outright — `400 UNKNOWN_AGENT` — the run never
+starts and the stray text never reaches a prompt.
+
+Its Worker prompt becomes that persona plus its own skills (`skills: []` is
+valid — it just defers entirely to the router); its memory is scoped to it,
+separate from every other agent's. Omit `tools:` and an agent gets the full
+allow-list (`read_file`, `write_file`, `list_files` — there's no shell tool
+to grant); set `tools: []` for none, or list a subset — an agent's tools can
+only ever be *narrower* than the global allow-list, never wider (a wider
+list is rejected). A name is refused outright if it contains `/`, `\`,
+`..`, or a NUL byte, never silently reduced to a sanitized slug; the slug a
+new agent actually gets combines its name and title. Leave a goal
 unassigned and behavior is exactly what it was before agents existed — the
 router picks skills the same way it always did. The built-in generalist
-agent (`agents/_builtin/general-worker.md`) is always present and can't be
-deleted, only replaced.
+agent (`agents/_builtin/general-worker.md`) is always present, its card
+reads "built-in · cannot be deleted", and it can't be — only replaced.
 
 ![the Agents roster](docs/screenshot-agents.png)
 

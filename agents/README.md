@@ -33,11 +33,15 @@ WORKFLOW section, not a generic "be helpful" paragraph.
 
 An agent's `skills` list restricts which packs its Worker can be routed to —
 the general-purpose router only picks among an agent's own skills, falling
-back to the built-in general pack if none of them match. A `skills:` entry
-naming a pack that isn't actually installed **disables the whole agent**,
-visibly (the reason shows on its card and in `GET /api/agents`) — it is
-never silently dropped, because that would quietly hand a goal to a
-different agent than the one asked for.
+back to the built-in general pack if none of them match. An empty
+`skills: []` is valid and deliberate, not a mistake: the roster card reads
+"no skills declared · the router may choose from the whole library" —
+this agent has no fixed specialism and defers entirely to the router's
+normal pick. A `skills:` entry naming a pack that isn't actually installed
+is a different case and **disables the whole agent**, visibly — the roster
+card shows it disabled with the reason, and `GET /api/agents` reports the
+same `errors` list — never silently dropped, because that would quietly
+hand a goal to a different agent than the one asked for.
 
 **`tools`**: omit the key entirely and an agent gets the full global
 allow-list (`read_file`, `write_file`, `list_files` — there is no shell
@@ -53,10 +57,28 @@ agent first, with the global pool as fallback.
 
 A name containing `/`, `\`, `..`, or a NUL byte is **refused with a 400**,
 not reduced to a sanitized slug — a name like `../../etc/passwd` does not
-quietly become the agent `etc-passwd`. Ordinary punctuation is fine:
-`"Riley, Meal-Prep Support"` → slug `riley-meal-prep-support`. Editing an
-existing agent (`PUT /api/agents/<slug>`) is a **partial edit** — only the
-fields you send change; omitted fields keep their current value.
+quietly become the agent `etc-passwd`. Ordinary punctuation is otherwise
+fine. **The slug a new agent gets from the create form is built from both
+the name and the title** — `name: Priya`, `title: Onboarding Specialist`
+becomes the slug `priya-onboarding-specialist` (the title is skipped if the
+name already ends with it, so it never stutters). Editing an existing agent
+(`PUT /api/agents/<slug>`) is a **partial edit** — only the fields you send
+change; omitted fields keep their current value.
+
+## Assigning a goal, and how you know it took
+
+Three channels assign a run to an agent, same precedence every time: the
+dashboard's **Assign to** picker; typing `@<slug>` at the very start of the
+goal text; or `omniagentos run --agent <slug> "<goal>"` from the CLI. A
+picker choice always wins over an `@mention` if both are present. Before
+you press Run, the line under the goal box (`agent-resolved`) says exactly
+who the run will execute as — or, if an `@mention` doesn't resolve to a
+real agent, says so before you can even submit it. An unresolvable or
+disabled agent (`@slug` that doesn't exist, or a picker value for an agent
+that's currently disabled) is refused outright — `400 UNKNOWN_AGENT` — the
+run never starts, and the unresolved text never reaches a prompt. The CLI
+has its own guard: `omniagentos run --agent <unknown> "..."` exits `2`
+before a single provider call.
 
 ## What's here
 
@@ -73,8 +95,14 @@ Five prebuilt agents, one per shipped sample skill area, each under 1.5 KB:
 Plus `_builtin/general-worker.md` — the always-present generalist (`skills: []`,
 falls back to whatever the router hands it) used when no other agent is
 assigned and no specific skill matches. A `_builtin/` file in this roster
-overrides the package's own packaged copy of the same slug, and answers
-`403` on `DELETE` — the generalist can't be removed, only replaced.
+overrides the package's own packaged copy of the same slug. Its card in the
+dashboard shows a disabled control reading **"built-in · cannot be
+deleted"** instead of a delete button, and the API answers the same thing
+if you go around the UI: `DELETE /api/agents/general-worker` → `403`.
+
+In the dashboard, the header's **Agents** nav link scrolls to this section
+(no page load). `GET /api/agents`'s `count` field is always exactly the
+length of the `agents` array beside it — every agent, builtin included.
 
 `scripts/lint_agents.py` enforces the format above (including `_builtin/`),
 plus: distinct slugs, every listed skill actually exists under `skills/`,

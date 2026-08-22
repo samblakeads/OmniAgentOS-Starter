@@ -54,24 +54,23 @@ Draft a 5-email onboarding sequence for OmniAgentOS Starter and save each email 
    card has Edit / Duplicate / delete; skip past Duplicate for this beat —
    it opens a prefilled copy of the form, not an instant card, and still
    needs an explicit Save.
-2. Click **Create**. Fill in exactly: name `Riley, Meal-Prep Support`,
-   title `Meal-Prep Support`, persona a sentence or two about handling
-   meal-plan subscription support, skill: check **Refund Request Handler**.
-   Save. **The name field is what the slug is built from — title, persona,
-   and everything else are display-only and don't affect it.** Typing the
-   full name exactly as shown produces the slug `riley-meal-prep-support`,
-   which is what goal 2's assignment below expects; a shorter name (just
-   "Riley") would produce the slug `riley` instead, and the assignment
-   below would not match it.
+2. Click **Create**. Fill in: name `Riley`, title `Meal-Prep Support`,
+   persona a sentence or two about handling meal-plan subscription
+   support, skill: check **Refund Request Handler**. Save. The slug is
+   built from both fields together — name `Riley` + title `Meal-Prep
+   Support` produces `riley-meal-prep-support`, which is what goal 2's
+   assignment below expects.
 3. The new roster card appears immediately — no reload.
-4. Go to the goal box for Goal 2 (below) and pick **Riley** from the
-   **Assign to** dropdown — that's the reliable way on stage. Typing
-   `@riley-meal-prep-support` at the start of the goal text does the same
-   thing when the slug is typed exactly right, but an unrecognized or
-   mistyped `@mention` is **not** caught or stripped today — the run
-   silently proceeds unassigned and the stray text can leak into the
-   customer-facing deliverable. Use the dropdown live; save the @-prefix
-   for a rehearsed take where you've already confirmed the slug.
+4. Go to the goal box for Goal 2 (below). Pick **Riley** from the
+   **Assign to** dropdown, or type `@riley-meal-prep-support` at the start
+   of the goal text — both work, and a picker choice always wins if both
+   are present. Either way, watch the line under the goal box: it says
+   "will run as Riley · Meal-Prep Support" the moment the assignment
+   resolves, before you press Run — that's the on-screen proof of who's
+   about to do the work. (An @mention that doesn't resolve to a real agent
+   is refused outright before the run starts — it's a hard stop, not a
+   silent miss — so a mistyped slug can't quietly ship as an unassigned
+   run with the stray text stuck in the reply.)
 
 **What you say:** "I didn't just get an agent that happens to be good at
 this — I built one, gave it a name, and told it which skill to carry. It
@@ -129,9 +128,9 @@ single prompt would have shipped."
 ## Goal 2 — customer-support (shows grounding on real policy text, run by the agent from Beat 0)
 
 Before you paste the goal in: from the **Assign to** picker, pick **Riley**
-(the agent you created in Beat 0) — the dropdown is the reliable choice on
-stage (see Beat 0's note on why a typed `@mention` isn't a safe substitute
-live). Then paste this policy as context, then the ask:
+(the agent you created in Beat 0) — or type `@riley-meal-prep-support` at
+the start of the goal box and watch the "will run as Riley" line confirm
+it. Then paste this policy as context, then the ask:
 
 ```
 Policy: Refunds are available within 30 days of purchase for unused
