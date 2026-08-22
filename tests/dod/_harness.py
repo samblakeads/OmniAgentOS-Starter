@@ -1029,6 +1029,29 @@ def parse_agent_file(path: Path) -> dict[str, Any]:
     return fm
 
 
+def set_agent_field_on_disk(path: Path, **fields: Any) -> None:
+    """Directly overwrite YAML front-matter fields on an agent .md file.
+
+    Bypasses the API entirely (no create/update validation runs) — used to
+    prove the engine ALSO validates team structure at run-start time, not
+    only at agent create/update time (defense in depth: a file edited
+    directly, or written by a version of the implementer's own code that
+    predates a validation fix, must still be caught before a run executes).
+    """
+    text = path.read_text(encoding="utf-8")
+    if not text.startswith("---"):
+        raise AssertionError(f"agent file {path} missing YAML front-matter")
+    parts = text.split("---", 2)
+    if len(parts) < 3:
+        raise AssertionError(f"agent file {path} malformed front-matter")
+    fm = yaml.safe_load(parts[1]) or {}
+    if not isinstance(fm, dict):
+        raise AssertionError(f"agent file {path} front-matter is not a mapping")
+    fm.update(fields)
+    new_fm_text = yaml.safe_dump(fm, sort_keys=False, default_flow_style=False)
+    path.write_text("---\n" + new_fm_text + "---" + parts[2], encoding="utf-8")
+
+
 def find_agent_file(root: Path, slug: str) -> Path:
     for p in root.rglob("*.md"):
         if p.stem == slug:

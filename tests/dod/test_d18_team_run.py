@@ -9,6 +9,7 @@ from _harness import (
     create_agent,
     event_payload,
     events_of,
+    find_agent_file,
     first_real_skill,
     get_json,
     get_run,
@@ -17,12 +18,27 @@ from _harness import (
     post_json,
     require_live,
     second_real_skill,
+    set_agent_field_on_disk,
     spawn_serve,
     start_run,
     team_delegated_events_of,
     tmp_agents_root,
     write_json,
 )
+
+
+def _run_error_tag(resp) -> str:
+    try:
+        body = resp.json()
+    except Exception:
+        return ""
+    if not isinstance(body, dict):
+        return ""
+    for key in ("error_tag", "error", "detail", "message"):
+        val = body.get(key)
+        if isinstance(val, str) and val.strip():
+            return val
+    return ""
 
 MEMBER1_PERSONA = (
     "Member One is a punchy direct-response copywriter who always leads "
@@ -279,6 +295,79 @@ def test_d18_malformed_team_disables_never_crashes():
             )
             cases[f"{label}-disabled-reason"] = str(errors)[:200]
 
+        # --- On-disk cycle, bypassing the API's own create/update
+        # validation entirely (Grok round-6 audit): a fresh valid manager
+        # + member pair, created normally through the API, then TWO member
+        # files are overwritten directly on disk to form a cycle
+        # (manager <-> the-member-it-manages) with no POST/PUT involved at
+        # all. POST /api/runs against that manager must STILL 400 with a
+        # named error_tag — never 200 (silently running with a broken
+        # hierarchy) and never 500 (crashing on the cycle at run-start).
+        # This proves run-start validation is defense-in-depth, not just a
+        # create/update-time check that a stale/hand-edited file bypasses.
+        cycle_member = create_agent(
+            srv.base_url,
+            name="Disk Cycle Member D18",
+            title="x",
+            persona="x " * 6,
+            skills=[skill_slug],
+        )
+        cycle_manager = create_agent(
+            srv.base_url,
+            name="Disk Cycle Manager D18",
+            title="x",
+            persona="x " * 6,
+            skills=[],
+            team=[cycle_member["slug"]],
+        )
+        member_file = find_agent_file(agents_root, cycle_member["slug"])
+        manager_file = find_agent_file(agents_root, cycle_manager["slug"])
+        # Confirm the pre-edit state is healthy (both files load, manager
+        # listed enabled) so a subsequent run-rejection can only be
+        # attributed to the cycle this test is about to introduce.
+        pre_listing = get_json(srv.base_url, "/api/agents").json()
+        pre_items = pre_listing.get("items") or pre_listing.get("agents") or pre_listing
+        if isinstance(pre_items, dict):
+            pre_items = pre_items.get("items") or []
+        pre_entry = next(
+            (i for i in pre_items if str(i.get("slug") or i.get("id")) == cycle_manager["slug"]),
+            None,
+        )
+        assert pre_entry is not None and pre_entry.get("enabled") is not False, (
+            f"cycle_manager must be healthy BEFORE the on-disk edit: {pre_entry!r}"
+        )
+        # Form the cycle directly on disk: the member now also "manages"
+        # the manager that manages it.
+        set_agent_field_on_disk(member_file, team=[cycle_manager["slug"]])
+
+        run_resp = post_json(
+            srv.base_url,
+            "/api/runs",
+            {"goal": "this must never execute", "agent_id": cycle_manager["slug"]},
+        )
+        cases["on-disk-cycle-run-status"] = run_resp.status_code
+        assert run_resp.status_code not in (200, 201), (
+            f"POST /api/runs against a manager with an on-disk cycle must NEVER 200/201 "
+            f"(silently running with a broken hierarchy), got {run_resp.status_code}: "
+            f"{run_resp.text[:400]}"
+        )
+        assert run_resp.status_code != 500, (
+            f"POST /api/runs against a manager with an on-disk cycle must NEVER 500 "
+            f"(crash at run-start instead of a clean rejection): {run_resp.text[:400]}"
+        )
+        assert run_resp.status_code == 400, (
+            f"POST /api/runs against a manager with an on-disk cycle must 400, got "
+            f"{run_resp.status_code}: {run_resp.text[:400]}"
+        )
+        tag = _run_error_tag(run_resp)
+        assert tag, (
+            f"on-disk-cycle run rejection has no named error_tag/error/detail/message: "
+            f"{run_resp.text[:400]}"
+        )
+        cases["on-disk-cycle-run-error-tag"] = tag
+        # The manager file itself must be untouched by this (read-only probe).
+        assert manager_file.is_file()
+
         write_json("d18-malformed-team.json", cases)
     finally:
         srv.stop()
@@ -372,21 +461,57 @@ def test_d18_team_run_ui_task_member_attribution_and_runs_filter():
                 wait_until="networkidle",
                 timeout=30_000,
             )
-            task_member_els = page.locator('[data-testid="task-member"]')
-            task_member_els.first.wait_for(state="visible", timeout=15_000)
-            count = task_member_els.count()
-            assert count >= 2, (
-                f"[data-testid=\"task-member\"] must render for >=2 tasks, found {count}"
+            # Per-task JOIN, not "exists somewhere on the page" (a mismatched
+            # join between task rows and delegated members would otherwise
+            # pass: e.g. member markers rendered in team.delegated order
+            # while task rows render in plan order). BINDING selector (read
+            # from static/app.js's renderTasks(): the `.task` row in
+            # #workers-body does not yet carry a task-id attribute at all —
+            # implementers must add `data-task-id="<task_id>"` to it; see
+            # BOUNDARIES.md): `[data-task-id="<id>"] [data-testid="task-member"]`.
+            mismatches = []
+            for tid, expected_member in task_member_map.items():
+                row_marker = page.locator(f'[data-task-id="{tid}"] [data-testid="task-member"]')
+                row_marker.first.wait_for(state="visible", timeout=15_000)
+                row_text = row_marker.first.inner_text()
+                expected_name = member_names.get(expected_member, expected_member)
+                if not (expected_member in row_text or expected_name in row_text):
+                    mismatches.append({"task_id": tid, "expected": expected_member, "got_text": row_text})
+            assert not mismatches, (
+                f"task row's own [data-task-id=\"<id>\"] [data-testid=\"task-member\"] does "
+                f"NOT name that task's delegated member (a mismatched join): {mismatches!r}"
             )
-            rendered_texts = [task_member_els.nth(i).inner_text() for i in range(count)]
-            for member_slug in task_member_map.values():
-                expected_name = member_names.get(member_slug, member_slug)
-                assert any(
-                    member_slug in t or expected_name in t for t in rendered_texts
-                ), (
-                    f"no [data-testid=\"task-member\"] element names delegated member "
-                    f"{member_slug!r} ({expected_name!r}); rendered={rendered_texts!r}"
-                )
+
+            # Cross-check the other direction: no task row may name a
+            # DIFFERENT member than its own team.delegated attribution —
+            # catches a mismatched join even when every expected name
+            # happens to appear somewhere on the page.
+            all_task_rows = page.locator("[data-task-id]")
+            row_count = all_task_rows.count()
+            assert row_count >= len(task_member_map), (
+                f"expected >={len(task_member_map)} rendered [data-task-id] rows, found {row_count}"
+            )
+            wrong_rows = []
+            for i in range(row_count):
+                row = all_task_rows.nth(i)
+                row_tid = row.get_attribute("data-task-id")
+                if row_tid not in task_member_map:
+                    continue
+                marker = row.locator('[data-testid="task-member"]')
+                if marker.count() == 0:
+                    continue
+                text = marker.first.inner_text()
+                expected_member = task_member_map[row_tid]
+                for other in (m for m in task_member_map.values() if m != expected_member):
+                    other_name = member_names.get(other, other)
+                    if other in text or other_name in text:
+                        wrong_rows.append(
+                            {"task_id": row_tid, "expected": expected_member, "named_instead": other, "text": text}
+                        )
+            assert not wrong_rows, (
+                f"a task row names a DIFFERENT member than its own delegated attribution "
+                f"(mismatched join): {wrong_rows!r}"
+            )
 
             # (3) clicking the manager card scopes the runs list.
             page.goto(srv.base_url + "/", wait_until="networkidle", timeout=30_000)

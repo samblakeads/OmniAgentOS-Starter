@@ -193,9 +193,24 @@ in this working tree.
   fallback path if U1b's design genuinely differs from PLAN's original
   wording for the cases D17 DOES cover — that fallback needs a coordinator
   decision if it is ever actually hit, not a silent oracle downgrade.
-- **D18 UI task-member attribution — `[data-testid="task-member"]`:**
-  one element per delegated task in the run's detail/timeline view, inner
-  text containing the delegated member's slug or display name.
+- **D18 UI task-member attribution — `[data-testid="task-member"]`, PER-TASK
+  JOIN (Grok round-6 audit tightening):** one element per delegated task in
+  the run's detail/timeline view, inner text containing the delegated
+  member's slug or display name. Existence-on-the-page alone is
+  insufficient — a mismatched join (e.g. markers rendered in
+  `team.delegated` order while task rows render in plan order) would pass
+  that weaker check. The oracle now requires selecting the SPECIFIC task
+  row via `[data-task-id="<task_id>"] [data-testid="task-member"]` and
+  checking that its own text names that task's own delegated member, plus
+  a reverse check that no task row names a DIFFERENT member than its own
+  attribution. **BINDING pin, read from the current `static/app.js`
+  (`renderTasks()`, `#workers-body .task` divs, ~line 762-770):** the
+  `.task` row does **not** currently carry any task-id attribute at all —
+  neither `renderTasks()`'s primary build nor the second `.task`-building
+  path (~line 926) sets one. Implementers must add
+  `data-task-id="<task_id>"` to the `.task` div (both render paths) for
+  this selector to resolve; until then this portion of D18 is
+  correctly/expectedly red.
 - **D18 UI run-scoping — `[data-testid="agent-runs-filter"]`:** visible
   after clicking an agent's roster card; inner text contains a run COUNT
   (parsed via `\d+`) that must equal `len(GET /api/runs?agent_id=<slug>
@@ -211,6 +226,18 @@ in this working tree.
   right now. Whoever lands the real UI/API for this must correct this pin
   (and the test, if the mechanism differs) rather than leave it silently
   wrong once the feature exists.
+- **D18 run-start cycle validation (Grok round-6 audit, defense-in-depth):**
+  `test_d18_malformed_team_disables_never_crashes` now also forms a cycle
+  DIRECTLY ON DISK (bypassing `POST`/`PUT /api/agents` entirely — via
+  `_harness.set_agent_field_on_disk()`, a raw front-matter rewrite) between
+  a manager and the member it manages, then `POST /api/runs` against that
+  manager. This must **400** with a named `error_tag`/`error`/`detail`/
+  `message` — **never 200/201** (silently running with a broken hierarchy)
+  and **never 500** (crashing at run-start instead of a clean rejection).
+  This proves team-structure validation runs at run-START time too, not
+  only at agent create/update time, so a hand-edited or stale file can
+  never slip a broken hierarchy past the API's own guards into an actual
+  run.
 
 ## Binding pins the oracle assumes (also listed in the U0 report)
 
