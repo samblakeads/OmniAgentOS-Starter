@@ -35,6 +35,9 @@ Draft a 5-email onboarding sequence for OmniAgentOS Starter and save each email 
       provider hiccups live, you switch to this without missing a beat.
 - [ ] Browser zoom is up (this is a stage, not a laptop) and the dashboard
       tab is already open at `http://127.0.0.1:8486`.
+- [ ] Remember: workspace file links open in a NEW TAB (`target=_blank`) —
+      plan to open just one file for goal 3, then switch back; don't click
+      all five on a projector.
 
 ---
 
@@ -108,6 +111,11 @@ email-4.md, and email-5.md in the workspace.
 start of this goal — fills in live as each worker task finishes, one file
 appearing per email. By the end there are 5 files sitting in a real
 directory on disk, not a single markdown blob.
+
+Each filename in the tree is a link that opens in a new tab
+(`target=_blank`) — click just one (e.g. `email-1.md`) to show it's real,
+then switch back to the dashboard tab. Don't open all five in a row on a
+projector; five new tabs stacking up mid-demo is its own distraction.
 
 **What you say:** "Every one of those is an actual file, written by the
 workspace tool, in a sandboxed directory scoped to this one run. Nothing

@@ -34,7 +34,7 @@ That's not a prompt box. That's a production line: one agent plans, another
 generates, another critiques, another verifies — and the system routes work
 to the best-fit agent for the job.
 
-![screenshot](docs/screenshot.png)
+![OmniAgentOS Starter dashboard — a finished run](docs/screenshot.png)
 
 ## Quickstart
 
