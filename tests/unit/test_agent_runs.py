@@ -306,3 +306,48 @@ def test_a_roster_loaded_before_the_library_would_disable_everything(settings, t
                             library=load_skills(SKILLS_ROOT))
     assert load_agents(root, library=load_skills(SKILLS_ROOT)).by_id("riley").enabled is True
     assert load_agents(root, library=load_skills(None)).by_id("riley").enabled is False
+
+
+# --------------------------------------------------- D16: the agent's equipment
+@pytest.mark.asyncio
+async def test_the_agents_own_skills_reach_the_worker_even_when_the_goal_words_it_differently(
+    settings, tmp_path
+):
+    """Equipment, not a lottery.
+
+    The agent carries a pack the router would never score against this goal. It
+    is still the agent's pack, and an agent that silently loses its expertise
+    whenever the goal is phrased unexpectedly is not the agent you configured.
+    """
+    writer = {
+        "name": "Max",
+        "title": "Content Writer",
+        "persona": "Writes like a human.",
+        "skills": ["vsl-script-builder"],
+        "tools": ["read_file"],
+    }
+    script = Script()
+    orch = _orch(settings, script, tmp_path, [writer])
+    run = orch.create(REFUND_GOAL, 1, [], agent_id="max")
+    await orch.execute(run)
+
+    prompt = script.prompt_text("worker")
+    owned = orch.library.by_id("vsl-script-builder")
+    assert f"skill-sha256:{owned.sha256}" in prompt, "the agent's own pack never reached the Worker"
+    # ...and nothing outside its list did.
+    outside = orch.library.by_id("refund-request-handler")
+    assert f"skill-sha256:{outside.sha256}" not in prompt, "a pack outside the agent's list leaked in"
+
+
+@pytest.mark.asyncio
+async def test_without_an_agent_the_worker_sees_exactly_the_selected_pack(settings, tmp_path):
+    script = Script()
+    orch = _orch(settings, script, tmp_path, [SUPPORT])
+    run = orch.create(REFUND_GOAL, 1, [])
+    await orch.execute(run)
+    prompt = script.prompt_text("worker")
+    selected = orch.library.by_id(_events(run, "skill.selected")[0]["skill_ids"][0])
+    assert f"skill-sha256:{selected.sha256}" in prompt
+    others = [p for p in orch.library.packs if p.slug != selected.slug]
+    for pack in others:
+        assert f"skill-sha256:{pack.sha256}" not in prompt

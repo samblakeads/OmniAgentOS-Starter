@@ -353,3 +353,75 @@ def test_a_written_agent_round_trips_through_the_loader(tmp_path):
     assert loaded.tools == created.tools
     assert loaded.body == created.body
     assert loaded.sha256 == created.sha256
+
+
+# ------------------------------------- D17: a path-shaped name is REFUSED
+@pytest.mark.parametrize(
+    "hostile", ["../../evil", "../../etc/passwd", "/etc/passwd", "evil\x00agent", "a\\\\b", "x/../y"]
+)
+def test_a_path_shaped_name_is_refused_rather_than_quietly_renamed(tmp_path, hostile):
+    """Reducing it to a valid slug and answering 201 is obedient, not safe.
+
+    `../../etc/passwd` would become the agent `etc-passwd`, created
+    successfully, and the caller would never learn their input was rewritten.
+    """
+    store = AgentStore(tmp_path / "agents")
+    with pytest.raises(AgentError) as exc:
+        store.create({"name": hostile, "persona": "x"})
+    assert exc.value.status == 400
+    assert not list(tmp_path.rglob("*.md"))
+
+
+def test_an_ordinary_name_with_punctuation_still_works(tmp_path):
+    store = AgentStore(tmp_path / "agents")
+    agent = store.create({"name": "Riley, Meal-Prep Support", "persona": "x"})
+    assert agent.slug == "riley-meal-prep-support"
+
+
+# ---------------------------------------- D15: PUT is an edit, not a replace
+def test_updating_only_one_field_keeps_the_rest(tmp_path):
+    root = tmp_path / "agents"
+    store = AgentStore(root)
+    library = load_skills(SKILLS_ROOT)
+    store.create(
+        {
+            "name": "Riley",
+            "title": "Meal-Prep Support",
+            "persona": "Calm and exact.",
+            "skills": ["refund-request-handler"],
+            "tools": ["read_file"],
+            "body": "Lead with the clause.",
+        },
+        library=library,
+    )
+    edited = store.update("riley", {"title": "Meal-Prep Support (edited)"}, library=library)
+    assert edited.title == "Meal-Prep Support (edited)"
+    assert edited.name == "Riley"
+    assert edited.persona == "Calm and exact."
+    assert edited.skills == ["refund-request-handler"]
+    assert edited.tools == ["read_file"]
+    assert edited.body == "Lead with the clause."
+    on_disk = load_agents(root, library=library).by_id("riley")
+    assert on_disk.title == "Meal-Prep Support (edited)"
+    assert on_disk.persona == "Calm and exact."
+
+
+# ------------------------------- a shipped _builtin/ file is a builtin agent
+def test_a_roster_builtin_directory_supplies_the_builtin(tmp_path):
+    root = tmp_path / "agents"
+    (root / "_builtin").mkdir(parents=True)
+    (root / "_builtin" / f"{BUILTIN_AGENT_SLUG}.md").write_text(
+        "---\nname: Shipped Worker\ntools: [read_file]\n---\nfrom the roster\n", encoding="utf-8"
+    )
+    _write(root, "riley")
+    roster = load_agents(root, library=load_skills(SKILLS_ROOT))
+    builtin = roster.by_id(BUILTIN_AGENT_SLUG)
+    assert builtin is not None and builtin.builtin is True
+    assert builtin.name == "Shipped Worker", "the shipped file wins over the packaged copy"
+    assert roster.integrity()["ok"] is True, "a shipped builtin is not a duplicate"
+    assert [a.slug for a in roster.agents] == ["riley"]
+
+    with pytest.raises(AgentError) as exc:
+        AgentStore(root).delete(BUILTIN_AGENT_SLUG, roster)
+    assert exc.value.status == 403
+    assert (root / "_builtin" / f"{BUILTIN_AGENT_SLUG}.md").is_file()

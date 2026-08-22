@@ -63,6 +63,11 @@ AGENT_PROHIBITION = (
 
 _ESC_ENTITIES = {'"': "&quot;", "'": "&apos;"}
 _SLUG_RE = re.compile(r"[^a-z0-9-]+")
+# Characters that only ever appear in a name because somebody is describing a
+# PATH rather than naming an agent. Reducing them away would be silently
+# obedient — `../../etc/passwd` would become the agent `etc-passwd`, created
+# successfully, and the operator would never learn their input was rewritten.
+_PATH_SHAPED_RE = re.compile(r"[/\\\x00]|\.\.")
 
 
 def _esc_attr(text) -> str:
@@ -111,6 +116,25 @@ def safe_agent_slug(raw: str) -> str:
 def slug_from_name(name: str) -> str:
     """The slug a newly created agent gets from its display name."""
     return safe_agent_slug(name)
+
+
+def reject_path_shaped(field: str, value: str) -> None:
+    """Refuse a name or slug that is describing a path rather than an agent.
+
+    safe_agent_slug() alone is enough to keep the write inside the roster — it
+    drops every structural character. But "safe" and "what you asked for" are
+    different questions: reducing `../../etc/passwd` to the agent `etc-passwd`
+    and answering 201 tells the caller their input was accepted when it was
+    rewritten. A refusal is the honest answer, and it is also the one that shows
+    up in a log as an attempt rather than as a slightly odd agent name.
+    """
+    raw = str(value or "")
+    if _PATH_SHAPED_RE.search(raw):
+        raise AgentError(
+            "BAD_REQUEST",
+            f"{field} may not contain path separators, '..' or null bytes — "
+            "an agent is named, not addressed by path",
+        )
 
 
 def normalise_tools(tools) -> list[str]:
@@ -364,9 +388,17 @@ def load_agents(root: Path | str | None, library=None) -> AgentRoster:
                 raise ValueError("agent file resolves outside the roster root")
             if path.stat().st_size > MAX_AGENT_BYTES:
                 raise ValueError(f"agent file exceeds {MAX_AGENT_BYTES} bytes")
-            agent = parse_agent(path)
+            # A file under `_builtin/` is part of the shipped roster, not an
+            # operator's agent: it loads as a builtin (so DELETE answers 403)
+            # rather than being reported as a duplicate of the packaged one.
+            in_builtin_dir = "_builtin" in path.relative_to(root).parts
+            agent = parse_agent(path, builtin=in_builtin_dir)
         except Exception as exc:
             roster.errors.append(f"{path.name}: {exc}")
+            continue
+        if in_builtin_dir and agent.slug == BUILTIN_AGENT_SLUG:
+            roster.builtin = agent
+            roster.files_on_disk -= 1
             continue
         if agent.slug in seen or agent.slug == BUILTIN_AGENT_SLUG:
             roster.errors.append(f"{path.name}: duplicate slug {agent.slug}")
@@ -432,6 +464,9 @@ class AgentStore:
         name = str(payload.get("name") or "").strip()[:MAX_NAME_CHARS]
         if not name:
             raise AgentError("BAD_REQUEST", "an agent needs a name")
+        reject_path_shaped("name", name)
+        if payload.get("slug"):
+            reject_path_shaped("slug", payload["slug"])
         wanted = safe_agent_slug(slug or payload.get("slug") or slug_from_name(name))
         if not wanted:
             raise AgentError(
@@ -471,11 +506,33 @@ class AgentStore:
         return agent
 
     def update(self, slug: str, payload: dict, library=None) -> Agent:
+        """Edit an existing agent. Fields the caller omits keep their value.
+
+        A PUT that carried only the field being changed used to be rejected for
+        having no `name` — which made the obvious edit ("just change the title")
+        the one thing the API would not do. The stored agent is the base and the
+        payload is the delta.
+        """
         self._ready()
         path = self.path_for(slug)
         if not path.is_file():
             raise AgentError("AGENT_NOT_FOUND", f"no agent {safe_agent_slug(slug)!r}", status=404)
-        agent = self.build(payload, slug=safe_agent_slug(slug))
+        if not isinstance(payload, dict):
+            raise AgentError("BAD_REQUEST", "an agent definition must be an object")
+        current = parse_agent(path)
+        merged = {
+            "name": current.name,
+            "title": current.title,
+            "persona": current.persona,
+            "skills": list(current.skills),
+            "tools": list(current.tools),
+            "memory_scope": current.memory_scope,
+            "visibility": current.visibility,
+            "version": current.version,
+            "body": current.body,
+        }
+        merged.update({k: v for k, v in payload.items() if v is not None})
+        agent = self.build(merged, slug=safe_agent_slug(slug))
         self._require_known_skills(agent, library)
         agent.path = str(path)
         path.write_text(agent.raw, encoding="utf-8")
