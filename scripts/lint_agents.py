@@ -48,13 +48,21 @@ def discover_skill_slugs(skills_dir: Path) -> set[str]:
 def check_front_matter(fm: dict, path: Path, skill_slugs: set[str]) -> list[str]:
     errors = []
     for key in REQUIRED_FRONT_MATTER_KEYS:
-        if key not in fm or fm[key] in ("", [], None):
+        if key not in fm:
+            errors.append(f"{path}: front-matter missing required key '{key}'")
+            continue
+        # "skills" may legitimately be an empty list — the shipped built-in
+        # generalist (agents/_builtin/general-worker.md) has no specific
+        # pack and falls back to whatever the router hands it. Every other
+        # required key must still have a real, non-empty value.
+        if key != "skills" and fm[key] in ("", [], None):
             errors.append(f"{path}: front-matter missing required key '{key}'")
 
     if "skills" in fm:
         skills = fm["skills"] if isinstance(fm["skills"], list) else [fm["skills"]]
-        if not skills:
-            errors.append(f"{path}: 'skills' list is empty — an agent needs at least one")
+        # An empty list is valid (the built-in generalist ships with skills: []
+        # and falls back to whatever the router hands it) — only a *named*
+        # skill that doesn't exist is an error.
         for s in skills:
             if s not in skill_slugs:
                 errors.append(
@@ -87,9 +95,11 @@ def check_front_matter(fm: dict, path: Path, skill_slugs: set[str]) -> list[str]
 
 
 def check_body(text: str, path: Path) -> list[str]:
+    """PLAN.md's schema only requires the body to BE standing instructions —
+    not any specific heading. A non-empty body is what's actually binding."""
     errors = []
-    if "## Standing instructions" not in text:
-        errors.append(f"{path}: missing required '## Standing instructions' section")
+    if not text.strip():
+        errors.append(f"{path}: body (after the front-matter) is empty")
     return errors
 
 
@@ -127,7 +137,9 @@ def main() -> int:
 
     skill_slugs = discover_skill_slugs(skills_dir)
 
-    files = sorted(p for p in agents_dir.glob("*.md") if p.name != "README.md")
+    # rglob, not glob: a roster _builtin/ subdirectory (e.g. general-worker.md)
+    # is a real, checked part of the shipped roster, not just top-level files.
+    files = sorted(p for p in agents_dir.rglob("*.md") if p.name.lower() != "readme.md")
     if not files:
         print(f"lint_agents: no agent .md files found under {agents_dir}", file=sys.stderr)
         return 1

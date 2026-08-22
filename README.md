@@ -105,10 +105,16 @@ allowed to draw on, and the tools it can use. Create one from the dashboard's
 `skills/`), then hand it a goal from the goal box's **Assign to** picker, or
 by starting the goal text with `@<slug>`. Its Worker prompt becomes that
 persona plus its own skills; its memory is scoped to it, separate from every
-other agent's; and its tools can only be a *narrower* set than the global
-allow-list, never wider. Leave a goal unassigned and behavior is exactly what
-it was before agents existed — the router picks skills the same way it always
-did.
+other agent's. Omit `tools:` and an agent gets the full allow-list
+(`read_file`, `write_file`, `list_files` — there's no shell tool to grant);
+set `tools: []` for none, or list a subset — an agent's tools can only ever
+be *narrower* than the global allow-list, never wider (a wider list is
+rejected). A name is refused outright if it contains `/`, `\`, `..`, or a
+NUL byte, never silently reduced to a sanitized slug. Leave a goal
+unassigned and behavior is exactly what it was before agents existed — the
+router picks skills the same way it always did. The built-in generalist
+agent (`agents/_builtin/general-worker.md`) is always present and can't be
+deleted, only replaced.
 
 ![the Agents roster](docs/screenshot-agents.png)
 

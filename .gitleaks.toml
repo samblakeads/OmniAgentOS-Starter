@@ -18,6 +18,8 @@
 #     shapes (xai-, sk-, Bearer, api_key=, hex/base64 blobs) the leak
 #     scanner runs against itself on every invocation to prove it still
 #     catches them (B5-F6 regression guard); none are real credentials.
+#   - tests/dod/test_d17_agent_invariants.py: reuses PLANTED_D10_KEY for a
+#     D10-regression re-check inside the Round 6 agent invariants oracle.
 
 [extend]
 useDefault = true
@@ -27,6 +29,7 @@ description = "Planted fake keys in the D10 DoD oracle test fixtures and their d
 paths = [
   '''tests/dod/_harness\.py''',
   '''tests/dod/test_d10_invariants\.py''',
+  '''tests/dod/test_d17_agent_invariants\.py''',
   '''tests/unit/test_redact\.py''',
   '''tests/unit/conftest\.py''',
   '''scripts/lint_skills\.py''',

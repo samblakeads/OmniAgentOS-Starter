@@ -13,11 +13,11 @@ no agent at all.
 
 ```yaml
 ---
-name: <first name or short handle>
+name: <first name or short handle>       # no /, \, .., or NUL — see Naming below
 title: <role title>
 persona: <2-4 sentences — voice, priorities, what this agent will not do>
-skills: [<skill-slug>, ...]        # must exist under skills/
-tools: [read_file, write_file, list_files]   # subset only, never wider
+skills: [<skill-slug>, ...]        # must exist under skills/, [] is valid (no specialism)
+tools: [read_file, write_file, list_files]   # narrower than this is fine; wider is a 400
 memory_scope: <slug>               # this agent's own lesson namespace
 visibility: public | private
 version: 1.0
@@ -33,11 +33,30 @@ WORKFLOW section, not a generic "be helpful" paragraph.
 
 An agent's `skills` list restricts which packs its Worker can be routed to —
 the general-purpose router only picks among an agent's own skills, falling
-back to the built-in general pack if none of them match. An agent's `tools`
-list can only **narrow** the global tool allow-list (`read_file`,
-`write_file`, `list_files` — there is no shell tool to grant), never widen it.
+back to the built-in general pack if none of them match. A `skills:` entry
+naming a pack that isn't actually installed **disables the whole agent**,
+visibly (the reason shows on its card and in `GET /api/agents`) — it is
+never silently dropped, because that would quietly hand a goal to a
+different agent than the one asked for.
+
+**`tools`**: omit the key entirely and an agent gets the full global
+allow-list (`read_file`, `write_file`, `list_files` — there is no shell
+tool to grant, ever); set `tools: []` and it gets none; list a subset to
+narrow it to exactly that. Any name **not** on the global allow-list is
+rejected outright (`400`), not silently ignored — an agent's tools can only
+ever get narrower than the global set, never wider.
+
 Memory is scoped per agent: lessons an agent learns are recalled for that
 agent first, with the global pool as fallback.
+
+## Naming
+
+A name containing `/`, `\`, `..`, or a NUL byte is **refused with a 400**,
+not reduced to a sanitized slug — a name like `../../etc/passwd` does not
+quietly become the agent `etc-passwd`. Ordinary punctuation is fine:
+`"Riley, Meal-Prep Support"` → slug `riley-meal-prep-support`. Editing an
+existing agent (`PUT /api/agents/<slug>`) is a **partial edit** — only the
+fields you send change; omitted fields keep their current value.
 
 ## What's here
 
@@ -51,11 +70,17 @@ Five prebuilt agents, one per shipped sample skill area, each under 1.5 KB:
 | `researcher` | Nora, Researcher | niche-opportunity-scorer |
 | `ops-assistant` | Sage, Ops Assistant | meeting-agenda-builder, cold-email-sequence-builder |
 
-`scripts/lint_agents.py` enforces the format above, plus: distinct slugs,
-every listed skill actually exists under `skills/`, every listed tool is on
-the global allow-list, a 1.5 KB ceiling per file, and the same
-hostname/IP/email/local-path/provider-key leak scan `lint_skills.py` runs on
-skill packs.
+Plus `_builtin/general-worker.md` — the always-present generalist (`skills: []`,
+falls back to whatever the router hands it) used when no other agent is
+assigned and no specific skill matches. A `_builtin/` file in this roster
+overrides the package's own packaged copy of the same slug, and answers
+`403` on `DELETE` — the generalist can't be removed, only replaced.
+
+`scripts/lint_agents.py` enforces the format above (including `_builtin/`),
+plus: distinct slugs, every listed skill actually exists under `skills/`,
+every listed tool is on the global allow-list, a 1.5 KB ceiling per file,
+and the same hostname/IP/email/local-path/provider-key leak scan
+`lint_skills.py` runs on skill packs.
 
 ## Drop your own in
 
