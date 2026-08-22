@@ -49,8 +49,13 @@ from .tools import TOOL_NAMES, WorkspaceGuard, WorkspaceRefused, workspace_for_r
 
 ROLES = ("planner", "worker", "critic", "verifier")
 
+# A file block ends at `=== END FILE ===`, at the next `=== FILE:` marker, or at
+# the end of the text. Depending on the terminator alone loses four files out of
+# five the moment a live model forgets to close a block — and the loss is silent,
+# because one enormous file looks exactly like one successful write.
 FILE_BLOCK_RE = re.compile(
-    r"^===\s*FILE:\s*(?P<path>[^\n=]+?)\s*===\s*\n(?P<body>.*?)(?:^===\s*END FILE\s*===\s*$|\Z)",
+    r"^===\s*FILE:\s*(?P<path>[^\n=]+?)\s*===\s*\n(?P<body>.*?)"
+    r"(?:^===\s*END FILE\s*===\s*$|(?=^===\s*FILE:)|\Z)",
     re.MULTILINE | re.DOTALL,
 )
 
@@ -66,8 +71,33 @@ VERDICT_SCHEMA = (
 LESSON_SCHEMA = '{"text":"one transferable lesson, max 300 chars","tags":["short","tags"]}'
 
 
+# xml.sax.saxutils.escape leaves quotes alone, which is safe in element bodies and
+# unsafe in attributes: a worker-chosen filename containing a double quote closes
+# `<file path="…">` early and the critic reads a garbled tag. Everything this
+# module interpolates is escaped for the stricter (attribute) context.
+_ESC_ENTITIES = {'"': "&quot;", "'": "&apos;"}
+
+
 def _esc(text: Any) -> str:
-    return xml_escape(str(text if text is not None else ""))
+    return xml_escape(str(text if text is not None else ""), _ESC_ENTITIES)
+
+
+def json_true(value: Any) -> bool:
+    """A JSON boolean true, and nothing else.
+
+    ``bool("false")`` is True, so a model that answers ``"pass": "false"`` — a
+    common shape from a model asked for JSON — would be recorded as a pass. Every
+    verdict-shaped field in this module goes through here so that anything which
+    is not literally ``true`` fails closed.
+    """
+    return value is True
+
+
+def json_flag(value: Any) -> bool:
+    """A permissive boolean for non-verdict fields — but a string that SAYS false is false."""
+    if isinstance(value, str):
+        return value.strip().lower() in {"true", "yes", "y", "1"}
+    return bool(value)
 
 
 def verifier_is_verified(payload: Any) -> bool:
@@ -301,6 +331,7 @@ class Engine:
         self.assignable: list[SkillPack] = []
         self.lessons: list = []
         self.lesson_block = ""
+        self._last_tool_error: dict | None = None
 
     # ------------------------------------------------------------ transcript
     def _write_transcript(self, entry: dict) -> None:
@@ -356,7 +387,14 @@ class Engine:
         try:
             run.workspace = workspace_for_run(self.workspace_dir, run.id, self.data_dir)
         except Exception as exc:
-            return self._fail("INTERNAL_ERROR", f"cannot create workspace: {exc}")
+            # The exception text is an OSError carrying the absolute path it failed
+            # on. That path is a fingerprint of the operator's machine and it would
+            # land in the SSE stream and on the projector: name the failure, not the
+            # filesystem.
+            return self._fail(
+                "INTERNAL_ERROR",
+                redact(f"cannot create the run workspace ({type(exc).__name__})"),
+            )
 
         try:
             await self._recall()
@@ -500,7 +538,7 @@ class Engine:
                 skill_id=skill_id if skill_id in valid_skills else default_skill,
                 instruction=str(raw.get("instruction") or raw.get("title") or self.run.goal)[:2000],
                 depends_on=[str(d)[:24] for d in (raw.get("depends_on") or []) if str(d).strip()],
-                writes_files=bool(raw.get("writes_files")),
+                writes_files=json_flag(raw.get("writes_files")),
             )
         if not self.tasks:
             self.tasks["t1"] = Task(
@@ -575,10 +613,38 @@ class Engine:
                 for tid in pending
                 if all(d in completed or d not in self.tasks for d in self.tasks[tid].depends_on)
             ] or list(pending)
-            await asyncio.gather(*(self._run_worker(self.tasks[tid], round_no, sem) for tid in batch))
+            await self._gather_batch(batch, round_no, sem)
             for tid in batch:
                 completed.add(tid)
                 pending.remove(tid)
+
+    async def _gather_batch(self, batch: list[str], round_no: int, sem: asyncio.Semaphore) -> None:
+        """Run one batch of workers; the first failure stops the rest.
+
+        ``asyncio.gather`` raises on the first exception and leaves its siblings
+        running. Those orphans keep streaming ``worker.delta`` and writing files
+        into a run that has already emitted ``run.failed`` — events after the
+        terminal event, and writes into a workspace nobody is watching. So: start
+        the tasks explicitly, cancel the unfinished ones as soon as one raises,
+        and only then let the exception out.
+        """
+        tasks = [
+            asyncio.ensure_future(self._run_worker(self.tasks[tid], round_no, sem)) for tid in batch
+        ]
+        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
+        first_error: BaseException | None = None
+        for t in done:
+            exc = t.exception()
+            if exc is not None:
+                first_error = first_error or exc
+        if first_error is None and not pending:
+            return
+        for t in pending:
+            t.cancel()
+        # Drain the cancellations before the caller writes any terminal event.
+        await asyncio.gather(*tasks, return_exceptions=True)
+        if first_error is not None:
+            raise first_error
 
     async def _run_worker(self, task: Task, round_no: int, sem: asyncio.Semaphore) -> None:
         async with sem:
@@ -655,8 +721,8 @@ class Engine:
             )
             if task.artifact:
                 task.history.append(task.artifact)
-            written = self._apply_file_blocks(task, text)
-            task.artifact = _clip(self._compose_artifact(text, written))
+            written, failed = self._apply_file_blocks(task, text)
+            task.artifact = _clip(self._compose_artifact(text, written, failed))
             task.fix_notes = []
             self.bus.emit(
                 "worker.finished",
@@ -670,30 +736,48 @@ class Engine:
             )
 
     # ------------------------------------------------------------ tool path
-    def _apply_file_blocks(self, task: Task, text: str) -> list[dict]:
+    def _apply_file_blocks(self, task: Task, text: str) -> tuple[list[dict], list[dict]]:
+        """Write every FILE block. Returns (written, failed) — failures are kept.
+
+        A block whose write was refused used to vanish from the artifact whenever
+        a sibling block succeeded, so the Critic judged a five-file deliverable on
+        the one file that landed and never saw why the others did not.
+        """
         written: list[dict] = []
+        failed: list[dict] = []
         for m in FILE_BLOCK_RE.finditer(text or ""):
             rel = m.group("path").strip()
             body = m.group("body")
+            self._last_tool_error = None
             result = self.write_file(rel, body, task_id=task.id)
             if result:
                 written.append(result)
+            else:
+                error = self._last_tool_error or {
+                    "error_tag": "WORKSPACE_ESCAPE",
+                    "reason": "the write was refused",
+                }
+                failed.append({"path": rel, "body": body, **error})
+        self._last_tool_error = None
         task.files = written
-        return written
+        return written, failed
 
     @staticmethod
     def _strip_file_blocks(text: str) -> str:
         return FILE_BLOCK_RE.sub("", text or "").strip()
 
-    def _compose_artifact(self, text: str, written: list[dict]) -> str:
+    def _compose_artifact(self, text: str, written: list[dict], failed: list[dict] | None = None) -> str:
         """What the checkers get to judge.
 
         A worker whose whole output was file blocks used to hand the Critic an
         empty artifact, and the Critic — correctly, on the evidence it had —
         failed every criterion while five perfectly good files sat in the
-        workspace. Files are work; the artifact carries them.
+        workspace. Files are work; the artifact carries them — and so does every
+        file the workspace guard refused, tagged, so the Critic sees the same
+        evidence the `tool.error` event carries.
         """
-        if not written:
+        failed = failed or []
+        if not written and not failed:
             return text
         prose = self._strip_file_blocks(text)
         parts = [prose] if prose else []
@@ -708,35 +792,47 @@ class Engine:
             body = body[: max(200, budget)]
             budget = max(0, budget - len(body))
             parts.append(f'<file path="{_esc(path)}">\n{_esc(body)}\n</file>')
+        for item in failed:
+            body = str(item.get("body") or "")[: max(200, budget)]
+            budget = max(0, budget - len(body))
+            parts.append(
+                f'<file path="{_esc(item.get("path", ""))}" written="false" '
+                f'error_tag="{_esc(item.get("error_tag", "WORKSPACE_ESCAPE"))}">\n'
+                f"NOT SAVED: {_esc(item.get('reason', ''))}\n{_esc(body)}\n</file>"
+            )
         return "\n\n".join(parts).strip()
 
     def write_file(self, rel: str, content: str, task_id: str = "") -> dict | None:
         """The single write path an agent has. An escape is loud, never silent."""
         if self.run.workspace is None:
-            self.bus.emit(
-                "tool.error",
-                {"tool": "write_file", "error_tag": "WORKSPACE_ESCAPE", "reason": "no workspace", "path": str(rel)[:120]},
+            return self._refuse_write(
+                {"error_tag": "WORKSPACE_ESCAPE", "reason": "no workspace", "path": str(rel)[:120]},
+                task_id,
             )
-            return None
         try:
             result = self.run.workspace.write_file(rel, content)
         except WorkspaceEscape as exc:
-            self.bus.emit("tool.error", {"tool": "write_file", "task_id": task_id, **exc.as_dict()})
-            return None
+            return self._refuse_write(exc.as_dict(), task_id)
         except OSError as exc:
-            self.bus.emit(
-                "tool.error",
+            return self._refuse_write(
                 {
-                    "tool": "write_file",
-                    "task_id": task_id,
                     "error_tag": "WORKSPACE_ESCAPE",
                     "reason": f"{type(exc).__name__}",
                     "requested": str(rel)[:120],
                 },
+                task_id,
             )
-            return None
         self.bus.emit("tool.write", {"tool": "write_file", "task_id": task_id, **result})
         return result
+
+    def _refuse_write(self, error: dict, task_id: str) -> None:
+        """Announce a refused write and remember it for the artifact."""
+        self._last_tool_error = {
+            "error_tag": error.get("error_tag", "WORKSPACE_ESCAPE"),
+            "reason": error.get("reason", "the write was refused"),
+        }
+        self.bus.emit("tool.error", {"tool": "write_file", "task_id": task_id, **error})
+        return None
 
     # ------------------------------------------------------------- 5. critic
     async def _critic(self, round_no: int, verifier_notes: str = "") -> list[dict]:
@@ -801,19 +897,26 @@ class Engine:
                 if exc.error_tag == "PROVIDER_BAD_RESPONSE" and attempts < 2:
                     continue
                 raise
+            # Verdicts from THIS body win over an earlier attempt's: the retry
+            # exists because the first answer was incomplete, and freezing the
+            # ids it did return means a hallucinated pass can never be corrected.
+            attempt_parsed: dict[str, dict] = {}
             for raw in body.get("verdicts") or []:
                 if not isinstance(raw, dict):
                     continue
                 cid = str(raw.get("criterion_id") or "").strip()
-                if cid not in ids or cid in parsed:
+                if cid not in ids or cid in attempt_parsed:
                     continue
-                parsed[cid] = {
+                attempt_parsed[cid] = {
                     "criterion_id": cid,
                     "task_id": str(raw.get("task_id") or "").strip(),
-                    "pass": bool(raw.get("pass")),
+                    # Not bool(): a JSON string "false" is truthy in Python, and a
+                    # criterion the model just failed would be recorded as a pass.
+                    "pass": json_true(raw.get("pass")),
                     "reason": str(raw.get("reason") or "")[:400],
                     "fix": str(raw.get("fix") or "")[:400],
                 }
+            parsed.update(attempt_parsed)
             missing = [cid for cid in ids if cid not in parsed]
             if not missing:
                 break
@@ -868,6 +971,15 @@ class Engine:
         )
         verdicts = await self._verdicts(system, user, ids, role="verifier", round_no=round_no)
         failures = [v for v in verdicts if not v["pass"]]
+        # The repair prompt's "THESE CHECKS ALREADY PASS" block is built from
+        # `last_verdicts`, which only the Critic writes. Without this, a criterion
+        # the Verifier has just rejected is handed to the worker as something it
+        # must keep — the fix notes say change it and the holding list says do not.
+        for v in failures:
+            self.last_verdicts[v["criterion_id"]] = False
+        for v in verdicts:
+            if v.get("task_id") in self.tasks:
+                self.criterion_task.setdefault(v["criterion_id"], v["task_id"])
         # Route the outcome through the same predicate the run loop trusts, so a
         # verdict that cannot be read comes back not-verified rather than True.
         verified = verifier_is_verified({"verified": not failures})
