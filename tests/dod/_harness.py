@@ -920,7 +920,14 @@ def tmp_agents_root() -> Path:
     tmp = Path(tempfile.mkdtemp(prefix="omniagentos-agents-"))
     dest = tmp / "agents"
     if src.is_dir():
-        shutil.copytree(src, dest)
+        # README.md is documentation, not an agent — exclude it from the
+        # tmp copy so a created-agent lookup can never match it by accident
+        # (e.g. its prose mentioning a test agent's name).
+        shutil.copytree(
+            src,
+            dest,
+            ignore=shutil.ignore_patterns("README.md", "readme.md"),
+        )
     else:
         builtin = dest / "_builtin"
         builtin.mkdir(parents=True, exist_ok=True)
@@ -977,6 +984,41 @@ def find_agent_file(root: Path, slug: str) -> Path:
         if p.stem == slug:
             return p
     raise AssertionError(f"no agents/**/{slug}.md under {root}")
+
+
+def find_agent_file_by_name(root: Path, name: str) -> Path:
+    """Locate a just-created agent's file by parsing front-matter `name:` exactly.
+
+    Never a substring/text-contains scan (that false-matched agents/README.md
+    once its prose happened to mention a test agent's first name — the F5-class
+    bug this replaces). README.md and anything under _builtin/ are excluded
+    outright: they are never a created-agent's own file. A candidate file that
+    fails to parse as agent front-matter (e.g. isn't one at all) is skipped,
+    not treated as a match.
+    """
+    candidates = []
+    for p in sorted(root.rglob("*.md")):
+        if p.name.lower() == "readme.md":
+            continue
+        if "_builtin" in p.relative_to(root).parts:
+            continue
+        try:
+            fm = parse_agent_file(p)
+        except AssertionError:
+            continue
+        if fm.get("name") == name:
+            candidates.append(p)
+    if not candidates:
+        raise AssertionError(
+            f"no agent file under {root} has front-matter name=={name!r} "
+            "(README.md and _builtin/ are excluded from this lookup)"
+        )
+    if len(candidates) > 1:
+        raise AssertionError(
+            f"ambiguous: {len(candidates)} agent files have front-matter name=={name!r}: "
+            f"{candidates!r}"
+        )
+    return candidates[0]
 
 
 def create_agent(

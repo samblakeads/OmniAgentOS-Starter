@@ -6,6 +6,7 @@ import httpx
 import pytest
 from _harness import (
     find_agent_file,
+    find_agent_file_by_name,
     first_real_skill,
     live_xai_base_url_ok,
     parse_agent_file,
@@ -63,12 +64,19 @@ def test_d15_agent_create_edit_duplicate_delete_via_browser():
 
             # File exists on disk under the ISOLATED tmp AgentStore root, not
             # the real shipped agents/ tree (OMNIAGENTOS_AGENTS_ROOT above).
-            agent_files_before = list(agents_root.rglob("*.md"))
+            # Located by parsing YAML front-matter `name:` EXACTLY — never a
+            # substring/text-contains scan (that false-matched agents/README.md
+            # once its prose happened to mention the test agent's first name).
+            # README.md and _builtin/ are excluded from this lookup outright.
+            agent_files_before = [
+                p
+                for p in agents_root.rglob("*.md")
+                if p.name.lower() != "readme.md" and "_builtin" not in p.relative_to(agents_root).parts
+            ]
             assert agent_files_before, f"no agent .md files under {agents_root} after create"
-            match = [f for f in agent_files_before if AGENT_NAME.split()[0].lower() in f.read_text(encoding="utf-8").lower()]
-            assert match, f"no on-disk agent file mentions {AGENT_NAME!r} under {agents_root}"
-            slug = match[0].stem
-            fm = parse_agent_file(match[0])
+            matched_file = find_agent_file_by_name(agents_root, AGENT_NAME)
+            slug = matched_file.stem
+            fm = parse_agent_file(matched_file)
             assert fm.get("name") == AGENT_NAME, f"front-matter name={fm.get('name')!r} != {AGENT_NAME!r}"
             assert fm.get("title") == AGENT_TITLE, f"front-matter title={fm.get('title')!r} != {AGENT_TITLE!r}"
             assert isinstance(fm.get("persona"), str) and fm["persona"].strip(), "front-matter persona empty"
