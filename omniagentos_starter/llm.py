@@ -241,7 +241,7 @@ class LLMClient:
                     if attempt < self.max_retries - 1:
                         await self._retry_sleep(attempt)
                         continue
-                    raise last
+                    raise last from None
                 response_id = str(body.get("id") or "")
                 self._emit_call(role, model, started, status, response_id, body.get("usage") or {}, False, attempt)
                 return content or "", response_id

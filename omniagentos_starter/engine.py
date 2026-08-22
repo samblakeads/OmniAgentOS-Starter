@@ -269,6 +269,17 @@ class Engine:
         criteria = criteria if criteria is not None else self.dod
         return "\n".join(f"- {c.id}: {_esc(c.criterion)} (source: {c.source})" for c in criteria)
 
+    def _worker_dod(self) -> list[Criterion]:
+        """What a worker is told it will be judged on.
+
+        Operator criteria (`extra_dod`) are deliberately withheld: they are a
+        rubric for the Critic and the Verifier, not a brief for the worker. The
+        loop is what makes the deliverable satisfy them, and that is the point —
+        a run that only passes because the answer was in the prompt proves
+        nothing about the production line.
+        """
+        return [c for c in self.dod if c.source != "operator"]
+
     def _goal_block(self) -> str:
         return f"<goal>{_esc(self.run.goal)}</goal>"
 
@@ -529,7 +540,7 @@ class Engine:
                         self._goal_block(),
                         f"YOUR TASK ({task.id}): {_esc(task.title)}\n{_esc(task.instruction)}",
                         deps and "ARTIFACTS FROM EARLIER TASKS:\n" + deps,
-                        "THIS WORK WILL BE CHECKED AGAINST:\n" + self._dod_block(),
+                        "THIS WORK WILL BE CHECKED AGAINST:\n" + self._dod_block(self._worker_dod()),
                         file_protocol,
                         repair,
                     ],

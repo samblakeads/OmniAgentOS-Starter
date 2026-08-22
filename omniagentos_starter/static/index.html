@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>OmniAgentOS Starter</title>
+<link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <img id="brand-logo" alt="OmniRogue" src="/assets/omnirogue-logo.png" />
+    <div class="brand-text">
+      <h1>OmniAgentOS Starter</h1>
+      <p class="tagline">Hand it a goal. A team of agents plans, executes, critiques, verifies — and keeps going until it's done.</p>
+    </div>
+  </div>
+  <div class="health" id="health-strip">
+    <span class="chip" id="chip-provider">◌ checking provider…</span>
+    <span class="chip" id="chip-skills">◌ skills</span>
+  </div>
+</header>
+
+<div id="error-banner" class="banner banner-error" hidden>
+  <span class="icon" aria-hidden="true">✕</span>
+  <span class="banner-tag" id="error-tag">ERROR</span>
+  <span class="banner-message" id="error-message"></span>
+  <button id="error-dismiss" class="link-button" type="button">dismiss</button>
+</div>
+
+<section id="first-run" class="panel first-run" hidden>
+  <h2>◌ No provider key found</h2>
+  <p>
+    OmniAgentOS Starter runs on your machine with your key. Set one of these environment
+    variables and restart:
+  </p>
+  <ul class="keylist">
+    <li><code>XAI_API_KEY</code> — grok-4.3 at api.x.ai (default)</li>
+    <li><code>OPENROUTER_API_KEY</code> — any model OpenRouter serves</li>
+    <li><code>OPENAI_API_KEY</code> — gpt-4.1-mini</li>
+  </ul>
+  <p class="first-run-tag">error_tag: <code id="first-run-tag">PROVIDER_NOT_CONFIGURED</code></p>
+  <button id="demo-button" class="primary" type="button">Watch the demo replay</button>
+  <p class="muted">The replay is a real recorded run, played back at reading speed.</p>
+</section>
+
+<main>
+  <section class="panel goal-panel">
+    <label for="goal" class="label">Your goal</label>
+    <textarea id="goal" rows="3" placeholder="Write exactly 3 ad headlines for an AI video tool, each under 40 characters, and explain in one line why each works"></textarea>
+    <div class="goal-actions">
+      <button id="run-button" class="primary" type="button">Run</button>
+      <button id="retry-button" class="secondary" type="button" hidden>Retry this goal</button>
+      <span id="busy" class="busy" hidden><span class="spinner" aria-hidden="true"></span><span id="busy-text">working…</span></span>
+      <span id="run-id" class="muted mono"></span>
+    </div>
+  </section>
+
+  <section class="line" aria-label="production line">
+    <article class="lane" id="lane-planner" data-lane="planner">
+      <header><span class="lane-icon" aria-hidden="true">◇</span><h2>Planner</h2><span class="lane-status" data-status>○ idle</span></header>
+      <div class="lane-body" id="planner-body"><p class="muted">Waiting for a goal.</p></div>
+    </article>
+    <div class="arrow" aria-hidden="true">→<span class="token" id="token-1"></span></div>
+
+    <article class="lane" id="lane-workers" data-lane="worker">
+      <header><span class="lane-icon" aria-hidden="true">▤</span><h2>Workers</h2><span class="lane-status" data-status>○ idle</span></header>
+      <div class="lane-body" id="workers-body"><p class="muted">No tasks yet.</p></div>
+    </article>
+    <div class="arrow" aria-hidden="true">→<span class="token" id="token-2"></span></div>
+
+    <article class="lane" id="lane-critic" data-lane="critic">
+      <header><span class="lane-icon" aria-hidden="true">⚖</span><h2>Critic</h2><span class="lane-status" data-status>○ idle</span></header>
+      <div class="lane-body" id="critic-body"><p class="muted">Nothing to check yet.</p></div>
+    </article>
+    <div class="arrow" aria-hidden="true">→<span class="token" id="token-3"></span></div>
+
+    <article class="lane" id="lane-verifier" data-lane="verifier">
+      <header><span class="lane-icon" aria-hidden="true">✓</span><h2>Verifier</h2><span class="lane-status" data-status>○ idle</span></header>
+      <div class="lane-body" id="verifier-body"><p class="muted">Awaiting a clean deliverable.</p></div>
+    </article>
+    <div class="arrow" aria-hidden="true">→<span class="token" id="token-4"></span></div>
+
+    <article class="lane lane-wide" id="lane-deliverable" data-lane="deliverable">
+      <header><span class="lane-icon" aria-hidden="true">▣</span><h2>Deliverable</h2><span class="lane-status" data-status>○ idle</span></header>
+      <div class="lane-body"><pre id="deliverable" class="deliverable"></pre></div>
+    </article>
+  </section>
+
+  <section id="critic-cards" class="critic-cards" aria-label="critic findings"></section>
+
+  <section class="columns">
+    <section class="panel">
+      <h2><span aria-hidden="true">☑</span> Quality gate</h2>
+      <ul id="dod-list" class="dod-list"><li class="muted">The Definition of Done appears once the Planner has run.</li></ul>
+    </section>
+
+    <section class="panel">
+      <h2><span aria-hidden="true">🧠</span> Memory</h2>
+      <div id="memory-body"><p class="muted">Lessons recalled from earlier runs appear here.</p></div>
+    </section>
+
+    <section class="panel">
+      <h2><span aria-hidden="true">🧩</span> Agent Skills</h2>
+      <div id="skills-body"><p class="muted">Loading skill library…</p></div>
+    </section>
+
+    <section class="panel">
+      <h2><span aria-hidden="true">🗂</span> Workspace</h2>
+      <ul id="file-tree" class="file-tree"><li class="muted">No files written in this run.</li></ul>
+    </section>
+  </section>
+</main>
+
+<footer class="receipt" id="receipt">
+  <span class="receipt-item">elapsed <b id="r-elapsed">–</b></span>
+  <span class="receipt-item">calls <b id="r-calls">–</b></span>
+  <span class="receipt-item">tokens <b id="r-tokens">–</b></span>
+  <span class="receipt-item">est $ <b id="r-cost">–</b></span>
+  <span class="receipt-item">provider <b id="r-provider">–</b></span>
+  <span class="receipt-item">model <b id="r-model">–</b></span>
+  <span class="receipt-item">rounds <b id="r-rounds">–</b></span>
+</footer>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
