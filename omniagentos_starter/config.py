@@ -71,6 +71,9 @@ ERROR_TAGS = (
     "TEAM_MISSING_MEMBER",
     "TEAM_DISABLED_MEMBER",
     "TEAM_TOO_DEEP",
+    # A delegated task whose needed tools no team member covers. Fail closed:
+    # never silently bind an uncovering member.
+    "TEAM_NO_ELIGIBLE_MEMBER",
     "AGENT_EXISTS",
     "AGENT_BUILTIN",
     "REPLAY_FAILED",

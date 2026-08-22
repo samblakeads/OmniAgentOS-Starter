@@ -63,7 +63,7 @@ FILE_BLOCK_RE = re.compile(
 PLANNER_SCHEMA = (
     '{"dod":[{"id":"d1","criterion":"one checkable requirement"}],'
     '"tasks":[{"id":"t1","title":"short title","skill_id":"<one of the skill ids given>",'
-    '"instruction":"what this worker must produce","depends_on":["t0"],"writes_files":false,"skill_reason":"only if you fell back to general-assistant: one sentence on why","member":"only when a TEAM is listed: the id of the member who does this task"}]}'
+    '"instruction":"what this worker must produce","depends_on":["t0"],"writes_files":false,"needs_tools":[],"skill_reason":"only if you fell back to general-assistant: one sentence on why","member":"only when a TEAM is listed: the id of the member who does this task"}]}'
 )
 VERDICT_SCHEMA = (
     '{"verdicts":[{"criterion_id":"<exactly one of the ids listed>","task_id":"<the task responsible>",'
@@ -99,6 +99,78 @@ def json_flag(value: Any) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"true", "yes", "y", "1"}
     return bool(value)
+
+
+# Tools-awareness must not depend on the planner flipping writes_files. A task
+# that names a file, says "save", or lists write_file still needs that tool.
+_WRITE_FILE_HINT = re.compile(
+    r"(?is)"
+    r"\bwrite_file\b"
+    r"|save(?:s|d|ing)?\b.{0,80}\bfiles?\b"
+    r"|\bfiles?\b.{0,40}\bsave(?:s|d|ing)?\b"
+    r"|write(?:s|n|ing)?\b.{0,40}\bfiles?\b"
+    r"|\b(?:as|to|into)\s+(?:a\s+)?(?:separate\s+)?files?\b"
+    r"|\bworkspace/"
+    r"|\b[\w./-]+\.(?:md|txt|json|csv|html|py|yml|yaml|pdf)\b"
+)
+_READ_FILE_HINT = re.compile(
+    r"(?is)"
+    r"\bread_file\b"
+    r"|read(?:s|ing)?\b.{0,80}\b(?:existing\s+)?files?\b"
+    r"|open(?:s|ing)?\b.{0,40}\b(?:existing\s+)?files?\b"
+)
+_LIST_FILES_HINT = re.compile(
+    r"(?is)"
+    r"\blist_files\b"
+    r"|list(?:s|ing)?\b.{0,80}\bfiles?\b"
+    r"|\bdirectory listing\b"
+)
+
+
+def parse_needs_tools(value: Any) -> tuple[str, ...]:
+    """Keep only allow-listed tool names, in TOOL_NAMES order. Unknown names drop."""
+    if value is None or value is False:
+        return ()
+    if isinstance(value, str):
+        items = [value]
+    elif isinstance(value, (list, tuple)):
+        items = value
+    else:
+        return ()
+    seen = {str(item or "").strip() for item in items}
+    allowed = set(TOOL_NAMES)
+    return tuple(name for name in TOOL_NAMES if name in seen and name in allowed)
+
+
+def derive_needed_tools(*parts: str) -> tuple[str, ...]:
+    """Infer tools from title/instruction text. Bare 'write a headline' is not a file write."""
+    blob = " ".join(str(part) for part in parts if str(part).strip())
+    if not blob:
+        return ()
+    found: set[str] = set()
+    if _WRITE_FILE_HINT.search(blob):
+        found.add("write_file")
+    if _READ_FILE_HINT.search(blob):
+        found.add("read_file")
+        found.add("list_files")
+    elif _LIST_FILES_HINT.search(blob):
+        found.add("list_files")
+    return tuple(name for name in TOOL_NAMES if name in found)
+
+
+def needed_tools_for_task(
+    *,
+    writes_files: bool = False,
+    needs_tools: tuple[str, ...] = (),
+    title: str = "",
+    instruction: str = "",
+) -> tuple[str, ...]:
+    """Eligibility set: planner needs_tools ∪ writes_files ∪ text-derived tools."""
+    found = set(parse_needs_tools(needs_tools))
+    if writes_files:
+        found.add("write_file")
+    found.update(derive_needed_tools(title, instruction))
+    return tuple(name for name in TOOL_NAMES if name in found)
 
 
 def verifier_is_verified(payload: Any) -> bool:
@@ -278,6 +350,9 @@ class Task:
     instruction: str
     depends_on: list[str] = field(default_factory=list)
     writes_files: bool = False
+    # Planner-declared tools for this task, already allow-list filtered.
+    # Eligibility unions this with writes_files and tools derived from text.
+    needs_tools: tuple[str, ...] = ()
     # Which team member executes this task. Empty on a run with no manager,
     # where the assigned agent (or nobody) is the worker throughout.
     member: str = ""
@@ -398,6 +473,22 @@ class TeamUnrunnable(ValueError):
         super().__init__(detail or f"agent {self.slug!r} cannot run: its team is unusable")
 
 
+class TeamRoutingRefused(Exception):
+    """A team task cannot be delegated: no member covers the needed tools.
+
+    Distinct from TeamUnrunnable (the hierarchy is fine; this task's tools
+    are not). Fail closed — never bind an uncovering member.
+    """
+
+    error_tag = "TEAM_NO_ELIGIBLE_MEMBER"
+
+    def __init__(self, task_id: str, needed: tuple[str, ...]):
+        self.task_id = task_id
+        self.needed = tuple(needed)
+        missing = ", ".join(self.needed) if self.needed else "the required tools"
+        super().__init__(f"task {task_id} cannot be delegated: no member covers {missing}")
+
+
 # ----------------------------------------------------------------- engine ---
 class Engine:
     """Executes one run. Construct per run; the Orchestrator owns the fleet."""
@@ -444,6 +535,9 @@ class Engine:
         self._last_tool_error: dict | None = None
         self.selection_fallback = True
         self.selection_scores: dict[str, float] = {}
+        # Per-task pack scores from `_route_team_tasks`. Team `skill.selected`
+        # must report these, not the stale whole-goal `selection_scores`.
+        self.task_selection_scores: dict[str, float] = {}
         self.skill_reasons: dict[str, str] = {}
         self.agent: Agent | None = run.agent
         # The roster is needed to resolve a manager's team into real agents.
@@ -676,6 +770,12 @@ class Engine:
             await self._loop()
         except ProviderError as exc:
             return self._fail(exc.error_tag, exc.safe_message)
+        except TeamRoutingRefused as exc:
+            return self._fail(
+                exc.error_tag,
+                str(exc),
+                failures=[{"task_id": exc.task_id, "needed_tools": list(exc.needed)}],
+            )
         except asyncio.CancelledError:
             return self._fail("INTERNAL_ERROR", "run cancelled")
         except Exception as exc:  # never a default status
@@ -915,7 +1015,9 @@ class Engine:
                         "Never invent work the goal did not ask for, and never use a candidate skill just because "
                         f"it was offered. Produce at most {MAX_PLAN_TASKS} tasks. Use depends_on when a task needs "
                         "an earlier task's artifact. Set writes_files true only when the goal asks for files to be "
-                        f"saved.\nThen add at most {MAX_PLANNER_ADDED_CRITERIA} further criteria in `dod` that are "
+                        "saved. Set needs_tools to the allow-listed tools this task requires "
+                        f"({', '.join(TOOL_NAMES)}); default []. Names outside that list are dropped.\n"
+                        f"Then add at most {MAX_PLANNER_ADDED_CRITERIA} further criteria in `dod` that are "
                         "specific to THIS goal (explicit counts, limits, required phrases, formats) and are not "
                         "already covered above.\nTwo hard rules for the criteria you add: (1) every one must be a "
                         "POSITIVE requirement the goal itself states — never invent a prohibition such as 'contains "
@@ -976,6 +1078,7 @@ class Engine:
                 instruction=str(raw.get("instruction") or raw.get("title") or self.run.goal)[:2000],
                 depends_on=[str(d)[:24] for d in (raw.get("depends_on") or []) if str(d).strip()],
                 writes_files=json_flag(raw.get("writes_files")),
+                needs_tools=parse_needs_tools(raw.get("needs_tools")),
                 member=member if any(m.slug == member for m in self.team) else "",
             )
         if not self.tasks:
@@ -1022,6 +1125,7 @@ class Engine:
                         "skill_id": t.skill_id,
                         "depends_on": t.depends_on,
                         "writes_files": t.writes_files,
+                        "needs_tools": list(t.needs_tools),
                         "skill_reason": self.skill_reasons.get(t.id, ""),
                         "member": t.member,
                     }
@@ -1089,10 +1193,13 @@ class Engine:
         return [t for t in TOOL_NAMES if t in allowed]
 
     def _task_needed_tools(self, task: Task) -> tuple[str, ...]:
-        """Tools the task's own declaration requires of whoever executes it."""
-        if task.writes_files:
-            return ("write_file",)
-        return ()
+        """Tools the executor must have: needs_tools ∪ writes_files ∪ text-derived."""
+        return needed_tools_for_task(
+            writes_files=task.writes_files,
+            needs_tools=task.needs_tools,
+            title=task.title,
+            instruction=task.instruction,
+        )
 
     def _member_covers_tools(self, member: Agent, needed: tuple[str, ...]) -> bool:
         if not needed:
@@ -1131,10 +1238,16 @@ class Engine:
         on goals. The task goes to the member owning the best-matching pack,
         and only that pack seeds the task's criteria.
 
-        A member is eligible only when the task's declared needs (writes_files
-        → write_file) sit inside that member's effective tools. Spread then
-        only considers members whose best score is within TEAM_SPREAD_RATIO of
-        the top (or a tie); otherwise the top member takes it.
+        A member is eligible only when the task's needed tools (planner
+        `needs_tools` ∪ writes_files ∪ tools derived from the instruction)
+        sit inside that member's effective tools. An empty eligible pool is
+        a named refusal (TEAM_NO_ELIGIBLE_MEMBER), never a silent bind.
+
+        Spread then only considers floor-clearing (member, pack) rows whose
+        best score is within TEAM_SPREAD_RATIO of the top (or a tie). A
+        below-floor pack inside the band cannot take the task. If only one
+        row clears the floor, that member takes it even if idle members sit
+        in the band. Otherwise the top member takes it.
 
         Fallback is per (task, chosen member): a floor-clearing pack on
         someone else does not skip the generalist when the chosen member's
@@ -1170,7 +1283,25 @@ class Engine:
             task = self.tasks[tid]
             rows = scored[tid]
             eligible_rows = [r for r in rows if r[4]]
-            pool_source = eligible_rows or list(rows)
+            if not eligible_rows:
+                needed = self._task_needed_tools(task)
+                missing = ", ".join(needed) if needed else "the required tools"
+                reason = f"task {task.id} cannot be delegated: no member covers {missing}"
+                self.bus.emit(
+                    "team.no_eligible_member",
+                    {
+                        "task_id": task.id,
+                        "error_tag": "TEAM_NO_ELIGIBLE_MEMBER",
+                        "needed_tools": list(needed),
+                        "missing_tool": needed[0] if needed else "",
+                        "reason": reason,
+                    },
+                )
+                raise TeamRoutingRefused(task.id, needed)
+            # Spread candidates are floor-clearing rows only. If nobody
+            # cleared, bind an eligible member and fall back after.
+            cleared = [r for r in eligible_rows if r[2] is not None and not r[3]]
+            pool_source = cleared or list(eligible_rows)
             top_score = max(r[0] for r in pool_source)
             if top_score > 0:
                 margin = top_score * self.TEAM_SPREAD_RATIO
@@ -1181,11 +1312,12 @@ class Engine:
             used_exists = any(loads[r[1].slug] > 0 for r in competitive)
             pool = unused if unused and used_exists else competitive
             pool.sort(key=_pick_key)
-            _score, member, pack, below, _eligible = pool[0]
+            score, member, pack, below, _eligible = pool[0]
             task.member = member.slug
             loads[member.slug] += 1
             if pack is None or below:
                 task.skill_id = general.slug
+                self.task_selection_scores[task.id] = 0.0
                 self.bus.emit(
                     "skill.selection_fallback",
                     {
@@ -1197,6 +1329,7 @@ class Engine:
                 )
             else:
                 task.skill_id = pack.slug
+                self.task_selection_scores[task.id] = float(score)
 
     def _announce_team_skills(self) -> None:
         """skill.selected / run.skills name what each task actually ran.
@@ -1230,8 +1363,12 @@ class Engine:
                 "skill_ids": [row["skill_id"] for row in rows],
                 "tasks": rows,
                 "scores": [
-                    {"skill_id": p.slug, "score": self.selection_scores.get(p.slug, 0)}
-                    for p in packs
+                    {
+                        "skill_id": row["skill_id"],
+                        "score": self.task_selection_scores.get(row["task_id"], 0),
+                        "task_id": row["task_id"],
+                    }
+                    for row in rows
                 ],
                 "skills": [p.as_dict() for p in packs],
                 "library_count": self.library.count,

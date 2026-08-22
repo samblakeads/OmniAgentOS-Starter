@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 from omniagentos_starter.agents import MAX_TEAM_DEPTH, AgentError, AgentStore, load_agents
 from omniagentos_starter.api import create_app
 from omniagentos_starter.config import Settings
+from omniagentos_starter.engine import derive_needed_tools, needed_tools_for_task, parse_needs_tools
 from omniagentos_starter.skills import builtin_pack, load_skills
 from omniagentos_starter.tools import TOOL_NAMES
 
@@ -268,6 +269,8 @@ async def test_the_manager_frames_the_plan(settings, tmp_path):
     assert "ad-copy-framework-writer" in planner
     assert "niche-opportunity-scorer" in planner
     assert "MUST go to different members" in planner
+    assert "needs_tools" in planner
+    assert "write_file" in planner
     for persona in (WRITER_PERSONA, RESEARCH_PERSONA):
         assert persona in planner, "the planner must know who it can delegate to"
 
@@ -402,6 +405,29 @@ async def test_a_task_matching_no_member_pack_uses_generalist_and_emits_fallback
     assert "vsl-script-builder" not in sources
     assert "ad-copy-framework-writer" not in sources
     assert "refund-request-handler" not in sources
+
+
+def test_needed_tools_are_derived_from_instruction_not_just_the_flag():
+    """F9 helper: saving/writing files or a filename implies write_file; bare 'write' does not."""
+    assert "write_file" in derive_needed_tools("save each email as a separate file")
+    assert "write_file" in derive_needed_tools(
+        "Save the reply under workspace/refund.md using write_file."
+    )
+    assert derive_needed_tools(
+        "Write three ad copy headlines using PAS framework with character limits."
+    ) == ()
+    reading = derive_needed_tools("read the existing files in the workspace")
+    assert "read_file" in reading and "list_files" in reading
+    assert parse_needs_tools(["write_file", "shell", "read_file"]) == ("read_file", "write_file")
+    assert needed_tools_for_task(
+        writes_files=False,
+        needs_tools=("write_file",),
+        instruction="Draft the refund reply.",
+    ) == ("write_file",)
+    assert needed_tools_for_task(
+        writes_files=False,
+        instruction="save each email as a separate file",
+    ) == ("write_file",)
 
 
 def _patch_best_match(library, table):
@@ -568,6 +594,234 @@ async def test_fallback_is_per_chosen_member_not_anyone_who_cleared(settings, tm
     assert fallback and fallback[-1]["task_id"] == "t1"
     assert fallback[-1]["member"] == "max"
     assert fallback[-1]["skill_id"] == "general-assistant"
+
+
+@pytest.mark.asyncio
+async def test_no_eligible_member_fails_closed_and_does_not_bind(settings, tmp_path):
+    """F8: both specialists lack write_file; a writes_files task must refuse, never bind."""
+    max_agent = {**COPYWRITER, "tools": ["read_file", "list_files"]}
+    ava_agent = {**SUPPORT, "tools": ["read_file", "list_files"]}
+    plan = {
+        "dod": [{"id": "p1", "criterion": "ok"}],
+        "tasks": [
+            {
+                "id": "t1",
+                "title": "Refund reply",
+                "skill_id": "refund-request-handler",
+                "instruction": "Draft the refund reply and save it to a file.",
+                "member": "ava",
+                "writes_files": True,
+            }
+        ],
+    }
+    script = Script(plan=plan)
+    orch = _orch(settings, script, tmp_path, [max_agent, ava_agent, STUDIO])
+    run = orch.create(
+        "Draft a refund reply citing the 30-day policy and save it to a file.",
+        1,
+        [],
+        agent_id="remy",
+    )
+    await orch.execute(run)
+
+    assert run.status == "failed", run.status
+    assert run.error_tag == "TEAM_NO_ELIGIBLE_MEMBER", run.error_tag
+    failed = _events(run, "run.failed")
+    assert failed, [e["type"] for e in run.bus.events]
+    assert failed[-1]["error_tag"] == "TEAM_NO_ELIGIBLE_MEMBER"
+    assert "t1" in failed[-1]["message"]
+    assert "write_file" in failed[-1]["message"]
+    refused = _events(run, "team.no_eligible_member")
+    assert refused, "named refusal event must fire before run.failed"
+    assert refused[0]["task_id"] == "t1"
+    assert "write_file" in refused[0]["needed_tools"]
+    assert _events(run, "team.delegated") == []
+    assert "worker.started" not in {e["type"] for e in run.bus.events}
+
+
+@pytest.mark.asyncio
+async def test_instruction_that_saves_files_is_tools_checked_without_the_flag(settings, tmp_path):
+    """F9: writes_files unset, instruction says save-as-file — Ava cannot win without write_file."""
+    max_agent = {**COPYWRITER, "tools": list(TOOL_NAMES)}
+    ava_agent = {**SUPPORT, "tools": ["read_file", "list_files"]}
+    plan = {
+        "dod": [{"id": "p1", "criterion": "ok"}],
+        "tasks": [
+            {
+                "id": "t1",
+                "title": "Refund reply",
+                "skill_id": "refund-request-handler",
+                "instruction": "save each email as a separate file",
+                "member": "ava",
+            }
+        ],
+    }
+    script = Script(plan=plan)
+    orch = _orch(settings, script, tmp_path, [max_agent, ava_agent, STUDIO])
+    _patch_best_match(
+        orch.library,
+        {
+            frozenset({"ad-copy-framework-writer", "vsl-script-builder"}): (
+                "ad-copy-framework-writer",
+                2.0,
+                False,
+            ),
+            frozenset({"refund-request-handler"}): ("refund-request-handler", 10.0, False),
+        },
+    )
+    run = orch.create(
+        "Draft a refund reply and save each email as a separate file.",
+        1,
+        [],
+        agent_id="remy",
+    )
+    await orch.execute(run)
+
+    delegated = _events(run, "team.delegated")
+    assert len(delegated) == 1, delegated
+    assert delegated[0]["member"] == "max", delegated
+    assert "write_file" in delegated[0]["tools"]
+
+
+@pytest.mark.asyncio
+async def test_spread_band_applies_at_the_80_percent_boundary(settings, tmp_path):
+    """F10: 8.0 vs 10.0, both above the floor — the idle member inside the band takes t2."""
+    plan = {
+        "dod": [{"id": "p1", "criterion": "Both parts are present."}],
+        "tasks": [
+            {
+                "id": "t1",
+                "title": "Headline one",
+                "skill_id": "ad-copy-framework-writer",
+                "instruction": "Write one PAS headline for a Meta feed ad.",
+                "member": "max",
+            },
+            {
+                "id": "t2",
+                "title": "Headline two",
+                "skill_id": "ad-copy-framework-writer",
+                "instruction": "Write a second PAS headline for the same Meta feed ad.",
+                "member": "max",
+            },
+        ],
+    }
+    script = Script(plan=plan)
+    orch = _orch(settings, script, tmp_path, [COPYWRITER, SUPPORT, STUDIO])
+    _patch_best_match(
+        orch.library,
+        {
+            frozenset({"ad-copy-framework-writer", "vsl-script-builder"}): (
+                "ad-copy-framework-writer",
+                10.0,
+                False,
+            ),
+            frozenset({"refund-request-handler"}): ("refund-request-handler", 8.0, False),
+        },
+    )
+    run = orch.create(
+        "Write two PAS ad headlines for a Meta feed ad.",
+        1,
+        [],
+        agent_id="remy",
+    )
+    await orch.execute(run)
+
+    delegated = {d["task_id"]: d for d in _events(run, "team.delegated")}
+    assert set(delegated) == {"t1", "t2"}, delegated
+    assert delegated["t1"]["member"] == "max"
+    assert delegated["t2"]["member"] == "ava", "8.0 is inside the 80% band of 10.0 and above the floor"
+
+
+@pytest.mark.asyncio
+async def test_spread_band_excludes_a_below_floor_row_inside_the_ratio(settings, tmp_path):
+    """F10: 8.0 below floor vs 10.0 above — idle Ava must not take t2 just for being unused."""
+    plan = {
+        "dod": [{"id": "p1", "criterion": "Both parts are present."}],
+        "tasks": [
+            {
+                "id": "t1",
+                "title": "Headline one",
+                "skill_id": "ad-copy-framework-writer",
+                "instruction": "Write one PAS headline for a Meta feed ad.",
+                "member": "max",
+            },
+            {
+                "id": "t2",
+                "title": "Headline two",
+                "skill_id": "ad-copy-framework-writer",
+                "instruction": "Write a second PAS headline for the same Meta feed ad.",
+                "member": "max",
+            },
+        ],
+    }
+    script = Script(plan=plan)
+    orch = _orch(settings, script, tmp_path, [COPYWRITER, SUPPORT, STUDIO])
+    _patch_best_match(
+        orch.library,
+        {
+            frozenset({"ad-copy-framework-writer", "vsl-script-builder"}): (
+                "ad-copy-framework-writer",
+                10.0,
+                False,
+            ),
+            frozenset({"refund-request-handler"}): ("refund-request-handler", 8.0, True),
+        },
+    )
+    run = orch.create(
+        "Write two PAS ad headlines for a Meta feed ad.",
+        1,
+        [],
+        agent_id="remy",
+    )
+    await orch.execute(run)
+
+    delegated = {d["task_id"]: d for d in _events(run, "team.delegated")}
+    assert set(delegated) == {"t1", "t2"}, delegated
+    assert delegated["t1"]["member"] == "max"
+    assert delegated["t2"]["member"] == "max", "below-floor pack inside the 80% band must not win"
+    assert delegated["t1"]["skill_id"] == "ad-copy-framework-writer"
+    assert delegated["t2"]["skill_id"] == "ad-copy-framework-writer"
+
+
+@pytest.mark.asyncio
+async def test_team_skill_selected_scores_are_the_per_task_match_scores(settings, tmp_path):
+    """F11: skill.selected scores on a team run are the per-task scores, not whole-goal leftovers."""
+    script = Script(plan=COLLAPSED_PLAN)
+    orch = _orch(settings, script, tmp_path, [COPYWRITER, SUPPORT, STUDIO])
+
+    def routed(text, allowed=None):
+        key = frozenset(allowed or ())
+        blob = (text or "").lower()
+        if "refund" in blob:
+            if "refund-request-handler" in key:
+                pack = orch.library.by_id("refund-request-handler")
+                return pack, 7.25, False
+            pack = orch.library.by_id("ad-copy-framework-writer")
+            return pack, 1.0, True
+        if "ad-copy-framework-writer" in key:
+            pack = orch.library.by_id("ad-copy-framework-writer")
+            return pack, 12.5, False
+        pack = orch.library.by_id("refund-request-handler")
+        return pack, 1.0, True
+
+    orch.library.best_match = routed  # type: ignore[method-assign]
+    run = orch.create(
+        "Part 1: write one punchy ad headline for a meal-prep service. "
+        "Part 2: draft a short reply to a customer refund request citing the 30-day policy.",
+        1,
+        [],
+        agent_id="remy",
+    )
+    await orch.execute(run)
+
+    selected = _events(run, "skill.selected")[-1]
+    assert selected["tasks"][0]["skill_id"] == "ad-copy-framework-writer"
+    assert selected["tasks"][1]["skill_id"] == "refund-request-handler"
+    by_task = {row["task_id"]: row for row in selected["scores"]}
+    assert by_task["t1"]["skill_id"] == "ad-copy-framework-writer"
+    assert by_task["t1"]["score"] == 12.5
+    assert by_task["t2"]["skill_id"] == "refund-request-handler"
+    assert by_task["t2"]["score"] == 7.25
 
 
 @pytest.mark.asyncio
@@ -794,7 +1048,7 @@ async def test_a_member_cannot_write_files_the_manager_may_not(settings, tmp_pat
     plan = {
         "dod": [{"id": "p1", "criterion": "ok"}],
         "tasks": [{"id": "t1", "title": "w", "skill_id": "ad-copy-framework-writer",
-                   "instruction": "x", "member": "nils", "writes_files": True}],
+                   "instruction": "x", "member": "nils"}],
     }
     script = Script(plan=plan, worker_text="=== FILE: n.md ===\nhi\n=== END FILE ===\ndone")
     boss = {**DIRECTOR, "name": "Dara", "tools": ["read_file", "list_files"]}
