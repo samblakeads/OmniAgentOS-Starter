@@ -538,7 +538,16 @@ class AgentStore:
         path.write_text(agent.raw, encoding="utf-8")
         return agent
 
-    def duplicate(self, slug: str, roster: AgentRoster, payload: dict | None = None) -> Agent:
+    def duplicate(
+        self, slug: str, roster: AgentRoster, payload: dict | None = None, library=None
+    ) -> Agent:
+        """Copy an agent. Validated exactly like create() — it writes a file too.
+
+        `library` was missing here while create() and update() both required it,
+        so duplicating with `{"skills": ["nonexistent-pack"]}` wrote a broken
+        agent to disk and answered 201. The validation belongs to WRITING an
+        agent, not to one of the three ways of doing it.
+        """
         self._ready()
         source = roster.by_id(slug)
         if source is None:
@@ -558,6 +567,7 @@ class AgentStore:
             },
             slug=payload.get("slug"),
         )
+        self._require_known_skills(clone, library)
         path = self.path_for(clone.slug)
         if path.exists():
             raise AgentError("AGENT_EXISTS", f"an agent named {clone.slug!r} already exists", status=409)

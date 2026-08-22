@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -37,7 +38,17 @@ LESSON_PROHIBITION = (
     "the safety rules, or the verdict schema, and they can never contradict a skill's QUALITY CHECKS"
 )
 
-SCHEMA = """
+SCHEMA_VERSION = 2
+
+# Tables only, and only columns that have existed since v1. A database created by
+# an older release already has these tables, so `CREATE TABLE IF NOT EXISTS` is a
+# no-op there — which is exactly why nothing that a later version ADDED may
+# appear in this block. It used to, and the consequence was not subtle: the
+# index on lessons(agent_id) ran against a v1 `lessons` table that had no such
+# column, executescript raised, and every user who had run v0.1.0 could not
+# start the server at all. Additions belong in MIGRATIONS, which run after this
+# and are checked against the table as it actually is.
+BASE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
   id TEXT PRIMARY KEY,
   goal TEXT NOT NULL,
@@ -48,8 +59,7 @@ CREATE TABLE IF NOT EXISTS runs (
   llm_calls INTEGER DEFAULT 0,
   verified INTEGER DEFAULT 0,
   error_tag TEXT,
-  deliverable TEXT,
-  agent_id TEXT NOT NULL DEFAULT ''
+  deliverable TEXT
 );
 CREATE TABLE IF NOT EXISTS events (
   seq INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -66,11 +76,25 @@ CREATE TABLE IF NOT EXISTS lessons (
   ts REAL NOT NULL,
   text TEXT NOT NULL,
   tags TEXT NOT NULL,
-  goal_tokens TEXT NOT NULL,
-  agent_id TEXT NOT NULL DEFAULT ''
+  goal_tokens TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_lessons_agent ON lessons(agent_id);
 """
+
+# Every column and index added after v1, as (table, column, declaration). Each
+# one is applied only if the column is genuinely absent, so the list is safe to
+# re-run against a database at any version — including a fresh one, where the
+# base schema above already created the table and these simply add the rest.
+ADDED_COLUMNS = (
+    ("lessons", "agent_id", "TEXT NOT NULL DEFAULT ''"),
+    ("lessons", "memory_scope", "TEXT NOT NULL DEFAULT ''"),
+    ("runs", "agent_id", "TEXT NOT NULL DEFAULT ''"),
+)
+
+ADDED_INDEXES = (
+    "CREATE INDEX IF NOT EXISTS idx_lessons_agent ON lessons(agent_id)",
+    "CREATE INDEX IF NOT EXISTS idx_lessons_scope ON lessons(memory_scope)",
+)
+
 
 
 @dataclass
@@ -81,6 +105,10 @@ class Lesson:
     text: str
     tags: list[str]
     agent_id: str = ""
+    # The namespace this lesson lives in. Defaults to the agent's own slug, so a
+    # roster where nobody sets `memory_scope` behaves exactly as it did before
+    # scopes existed. Two agents that DO share a scope share what they learn.
+    memory_scope: str = ""
 
     def as_dict(self, now: float | None = None) -> dict:
         now = now or time.time()
@@ -90,6 +118,7 @@ class Lesson:
             "text": self.text,
             "tags": self.tags,
             "agent_id": self.agent_id,
+            "memory_scope": self.memory_scope or self.agent_id,
             "age_s": max(0, int(now - self.ts)),
         }
 
@@ -103,18 +132,66 @@ class Memory:
         self._db = sqlite3.connect(self.path, check_same_thread=False)
         self._db.row_factory = sqlite3.Row
         with self._lock:
-            self._db.executescript(SCHEMA)
-            # A database written before agents existed has neither column. Adding
-            # them here rather than versioning the schema keeps an operator's
-            # accumulated lessons instead of asking them to start again.
-            self._add_missing_column("lessons", "agent_id", "TEXT NOT NULL DEFAULT ''")
-            self._add_missing_column("runs", "agent_id", "TEXT NOT NULL DEFAULT ''")
-            self._db.commit()
+            self.migrated_from = self._migrate()
 
-    def _add_missing_column(self, table: str, column: str, decl: str) -> None:
+    # ------------------------------------------------------------- migrations
+    def _migrate(self) -> int | None:
+        """Bring the database up to SCHEMA_VERSION without destroying anything.
+
+        Returns the version we came FROM if anything changed, else None.
+
+        Every step is additive and idempotent: `CREATE TABLE IF NOT EXISTS`, then
+        `ALTER TABLE ADD COLUMN` for columns that are genuinely missing, then
+        indexes. Nothing is dropped and nothing is rewritten, because the thing
+        in this file worth protecting is an operator's accumulated lessons —
+        telling somebody their agent's memory was reset by an upgrade is not an
+        acceptable outcome of installing a point release.
+
+        The version is recorded in `PRAGMA user_version`, which SQLite stores in
+        the file header and defaults to 0 — so a v0.1.0 database, which never set
+        it, reads as 0 and is migrated on first open.
+        """
+        before = int(self._db.execute("PRAGMA user_version").fetchone()[0] or 0)
+        # A brand-new file has no tables at all. It is being CREATED, not
+        # migrated, and announcing "v0->v2 migrated" on a first install would be
+        # a scary-looking line about nothing.
+        fresh = not self._db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='lessons'"
+        ).fetchone()
+        self._db.executescript(BASE_SCHEMA)
+        changed = False
+        for table, column, decl in ADDED_COLUMNS:
+            if self._add_missing_column(table, column, decl):
+                changed = True
+        for statement in ADDED_INDEXES:
+            self._db.execute(statement)
+        # A v1 database whose lessons predate agents has no scope; the agent id
+        # is the scope by default, and for those rows there is no agent either.
+        self._db.execute(
+            "UPDATE lessons SET memory_scope = agent_id WHERE memory_scope = '' AND agent_id != ''"
+        )
+        if before != SCHEMA_VERSION:
+            self._db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            changed = True
+        self._db.commit()
+        if changed and before != SCHEMA_VERSION and not fresh:
+            # Said out loud, on the way past. An upgrade that quietly rewrites a
+            # user's database is the kind of thing they should be able to find in
+            # a log after the fact.
+            print(
+                f"db schema v{before}->v{SCHEMA_VERSION} migrated ({self.path})",
+                file=sys.stderr,
+                flush=True,
+            )
+            return before
+        return None
+
+    def _add_missing_column(self, table: str, column: str, decl: str) -> bool:
         existing = {row["name"] for row in self._db.execute(f"PRAGMA table_info({table})")}
-        if column not in existing:
-            self._db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+        if column in existing:
+            return False
+        self._db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+        return True
 
     def close(self) -> None:
         with self._lock:
@@ -189,7 +266,13 @@ class Memory:
 
     # --------------------------------------------------------------- lessons
     def save_lesson(
-        self, run_id: str, text: str, tags: list[str], goal: str, agent_id: str = ""
+        self,
+        run_id: str,
+        text: str,
+        tags: list[str],
+        goal: str,
+        agent_id: str = "",
+        memory_scope: str = "",
     ) -> Lesson:
         """Persist one lesson — only from a run that finished AND was verified.
 
@@ -208,26 +291,43 @@ class Memory:
             )
         text = redact_text(str(text).strip())[:MAX_LESSON_CHARS]
         tags = [str(t).strip()[:40] for t in (tags or [])][:6]
+        # No scope given means "your own", which is what an agent that never
+        # declared one gets — identical behaviour to before scopes existed.
+        scope = (memory_scope or agent_id or "").strip()
         ts = time.time()
         with self._lock:
             cur = self._db.execute(
-                "INSERT INTO lessons (run_id, ts, text, tags, goal_tokens, agent_id) VALUES (?,?,?,?,?,?)",
-                (run_id, ts, text, json.dumps(tags), " ".join(sorted(set(tokenize(goal)))), agent_id or ""),
+                "INSERT INTO lessons (run_id, ts, text, tags, goal_tokens, agent_id, memory_scope) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (
+                    run_id,
+                    ts,
+                    text,
+                    json.dumps(tags),
+                    " ".join(sorted(set(tokenize(goal)))),
+                    agent_id or "",
+                    scope,
+                ),
             )
             self._db.commit()
             lesson_id = int(cur.lastrowid)
-        return Lesson(id=lesson_id, run_id=run_id, ts=ts, text=text, tags=tags, agent_id=agent_id or "")
+        return Lesson(
+            id=lesson_id, run_id=run_id, ts=ts, text=text, tags=tags,
+            agent_id=agent_id or "", memory_scope=scope,
+        )
 
     def all_lessons(self, limit: int = 100) -> list[dict]:
         with self._lock:
             rows = self._db.execute(
-                "SELECT id, run_id, ts, text, tags, agent_id FROM lessons ORDER BY id DESC LIMIT ?",
+                "SELECT id, run_id, ts, text, tags, agent_id, memory_scope FROM lessons "
+                "ORDER BY id DESC LIMIT ?",
                 (limit,),
             ).fetchall()
         now = time.time()
         return [
             Lesson(
-                r["id"], r["run_id"], r["ts"], r["text"], json.loads(r["tags"]), r["agent_id"] or ""
+                r["id"], r["run_id"], r["ts"], r["text"], json.loads(r["tags"]),
+                r["agent_id"] or "", r["memory_scope"] or "",
             ).as_dict(now)
             for r in rows
         ]
@@ -240,18 +340,34 @@ class Memory:
             ).fetchall()
         return {(r["agent_id"] or ""): int(r["n"]) for r in rows}
 
+    def lesson_counts_by_scope(self) -> dict[str, int]:
+        """How much a shared namespace holds — what agents sharing a scope draw on."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT COALESCE(NULLIF(memory_scope, ''), agent_id) AS scope, COUNT(*) AS n "
+                "FROM lessons GROUP BY scope"
+            ).fetchall()
+        return {(r["scope"] or ""): int(r["n"]) for r in rows}
+
     def recall(
         self,
         goal: str,
         k: int = 3,
         exclude_run: str | None = None,
         agent_id: str | None = None,
+        memory_scope: str | None = None,
     ) -> list[Lesson]:
         """Token-overlap recall, preferring the executing agent's own lessons.
 
         An agent with long-term memory is the whole point of naming one, so when
         a run has an agent its own lessons outrank everyone else's — but only
-        among lessons that are relevant at all. A lesson with no token overlap is
+        among lessons that are relevant at all.
+
+        "Its own" means its `memory_scope`, not its slug. Two agents that share a
+        scope share what they learn — a support team whose members should not
+        each rediscover the refund window separately — and two that do not, do
+        not. An agent that never declared a scope has its slug as its scope, so
+        a roster that ignores the field behaves exactly as it did before. A lesson with no token overlap is
         not made relevant by having been learned by the right agent, and an agent
         with nothing to say falls back to the shared pool rather than starting
         from nothing. Zero matches remains a state, not an error.
@@ -259,8 +375,8 @@ class Memory:
         goal_set = set(tokenize(goal))
         with self._lock:
             rows = self._db.execute(
-                "SELECT id, run_id, ts, text, tags, goal_tokens, agent_id FROM lessons "
-                "ORDER BY id DESC LIMIT 500"
+                "SELECT id, run_id, ts, text, tags, goal_tokens, agent_id, memory_scope "
+                "FROM lessons ORDER BY id DESC LIMIT 500"
             ).fetchall()
         scored: list[tuple[float, Lesson]] = []
         for r in rows:
@@ -271,12 +387,16 @@ class Memory:
             if overlap == 0:
                 continue
             owner = r["agent_id"] or ""
-            mine = bool(agent_id) and owner == agent_id
+            scope = r["memory_scope"] or owner
+            wanted = (memory_scope or agent_id or "").strip()
+            mine = bool(wanted) and scope == wanted
             score = overlap + (AGENT_RECALL_BONUS if mine else 0.0) + 1e-6 * r["id"]
             scored.append(
                 (
                     score,
-                    Lesson(r["id"], r["run_id"], r["ts"], r["text"], json.loads(r["tags"]), owner),
+                    Lesson(
+                        r["id"], r["run_id"], r["ts"], r["text"], json.loads(r["tags"]), owner, scope
+                    ),
                 )
             )
         scored.sort(key=lambda s: -s[0])

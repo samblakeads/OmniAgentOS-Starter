@@ -406,7 +406,12 @@ def create_app(settings: Settings | None = None, orchestrator: Orchestrator | No
         except Exception:
             payload = {}
         try:
-            agent = store.duplicate(slug, _reload_roster(), payload if isinstance(payload, dict) else {})
+            agent = store.duplicate(
+                slug,
+                _reload_roster(),
+                payload if isinstance(payload, dict) else {},
+                library=orch.library,
+            )
         except AgentError as exc:
             return _agent_error(exc)
         _reload_roster()
