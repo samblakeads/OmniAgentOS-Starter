@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
 """Lint every agent file under agents/ against the front-matter schema in
-PLAN.md's Round 6 (AGENTS) section and agents/README.md, and reuse
-lint_skills.py's leak scan (hostnames/emails/IPs/paths/provider-key shapes).
+PLAN.md's Round 6 (AGENTS) and Round 8 (TEAMS) sections and agents/README.md,
+and reuse lint_skills.py's leak scan (hostnames/emails/IPs/paths/provider-key
+shapes).
+
+Team validation mirrors omniagentos_starter/agents.py::_validate_hierarchy()
+exactly (self-reference, missing members, cycles, MAX_TEAM_DEPTH) so a bad
+team: line is caught here before it ever reaches the loader's disable-with-
+reason path — this is a stricter pre-flight, not a looser reimplementation.
 
 stdlib only — no third-party dependencies. Exits 1 on any failure, prints one
 line per problem found, and a summary at the end.
@@ -37,6 +43,11 @@ REQUIRED_FRONT_MATTER_KEYS = (
 ALLOWED_TOOLS = {"read_file", "write_file", "list_files"}
 ALLOWED_VISIBILITY = {"public", "private"}
 MAX_BYTES = 1536  # 1.5 KB ceiling per PLAN.md Round 6
+# Mirrors omniagentos_starter/agents.py's MAX_TEAM_MEMBERS / MAX_TEAM_DEPTH
+# exactly (literal copy, not an import — same stdlib-only pattern as the rest
+# of this script).
+MAX_TEAM_MEMBERS = 8
+MAX_TEAM_DEPTH = 2
 
 
 def discover_skill_slugs(skills_dir: Path) -> set[str]:
@@ -89,6 +100,71 @@ def check_front_matter(fm: dict, path: Path, skill_slugs: set[str]) -> list[str]
         if not (2 <= sentence_count <= 4):
             errors.append(
                 f"{path}: persona should be 2-4 sentences, found {sentence_count}"
+            )
+
+    # team: is optional (Round 8) — only present on a manager agent. Presence
+    # and shape only here; cross-file checks (self, missing, cycle, depth)
+    # need every agent's slug and team, so they happen in check_hierarchy()
+    # after every file has been parsed once.
+    if "team" in fm:
+        team = fm["team"] if isinstance(fm["team"], list) else [fm["team"]]
+        if len(team) > MAX_TEAM_MEMBERS:
+            errors.append(
+                f"{path}: team has {len(team)} members, must be <= {MAX_TEAM_MEMBERS}"
+            )
+
+    return errors
+
+
+def parse_team(fm: dict) -> list[str]:
+    team = fm.get("team") or []
+    if isinstance(team, str):
+        team = [team]
+    return [str(t).strip() for t in team if str(t).strip()]
+
+
+def check_hierarchy(team_by_slug: dict[str, list[str]], all_slugs: set[str]) -> list[str]:
+    """Cross-file team validation, mirroring _validate_hierarchy() exactly:
+    self-reference, missing members, cycles (including 2-agent A<->B loops),
+    and MAX_TEAM_DEPTH — a manager-of-managers chain deeper than 2."""
+    errors: list[str] = []
+
+    for slug, team in team_by_slug.items():
+        if not team:
+            continue
+        if slug in team:
+            errors.append(f"agents/{slug}.md: team includes itself — an agent cannot delegate to itself")
+            continue
+        missing = [m for m in team if m not in all_slugs]
+        if missing:
+            errors.append(
+                f"agents/{slug}.md: team members are not in the roster: {', '.join(sorted(missing))}"
+            )
+
+    def depth(slug: str, seen: tuple[str, ...]) -> int | str:
+        if slug in seen:
+            return "team contains a cycle: " + " → ".join([*seen, slug])
+        team = team_by_slug.get(slug) or []
+        if not team:
+            return 0
+        deepest = 0
+        for member in team:
+            below = depth(member, (*seen, slug))
+            if isinstance(below, str):
+                return below
+            deepest = max(deepest, below)
+        return deepest + 1
+
+    for slug, team in team_by_slug.items():
+        if not team or slug in team or any(m not in all_slugs for m in team):
+            continue  # already reported above; do not double-count
+        result = depth(slug, ())
+        if isinstance(result, str):
+            errors.append(f"agents/{slug}.md: {result}")
+        elif result > MAX_TEAM_DEPTH:
+            errors.append(
+                f"agents/{slug}.md: delegation chain is {result} deep; "
+                f"the limit is {MAX_TEAM_DEPTH} so a run's provenance stays explainable"
             )
 
     return errors
@@ -146,6 +222,7 @@ def main() -> int:
 
     all_errors: list[str] = []
     slugs: dict[str, Path] = {}
+    team_by_slug: dict[str, list[str]] = {}
 
     for f in files:
         slug = f.stem
@@ -154,6 +231,18 @@ def main() -> int:
         else:
             slugs[slug] = f
         all_errors.extend(lint_file(f, skill_slugs))
+        try:
+            fm, _body, _fm_errors = lint_skills.parse_front_matter(
+                f.read_text(encoding="utf-8"), f
+            )
+        except Exception:
+            fm = {}
+        if fm and "team" in fm:
+            team_by_slug[slug] = parse_team(fm)
+
+    # Cross-file hierarchy checks need every slug and team known first — a
+    # manager listed earlier in sorted order than its member is still valid.
+    all_errors.extend(check_hierarchy(team_by_slug, set(slugs)))
 
     if all_errors:
         print(f"lint_agents: {len(all_errors)} problem(s) found in {len(files)} agent(s):\n")

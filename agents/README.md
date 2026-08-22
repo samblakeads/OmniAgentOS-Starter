@@ -80,17 +80,48 @@ run never starts, and the unresolved text never reaches a prompt. The CLI
 has its own guard: `omniagentos run --agent <unknown> "..."` exits `2`
 before a single provider call.
 
+## Teams — bots managing bots
+
+Add `team: [<slug>, ...]` to an agent's front-matter and it becomes a
+**manager** — a run assigned to it doesn't execute the goal itself, it
+splits the work across its listed team members instead. Each delegated
+task runs under that member's own persona, skills, and tools (never the
+manager's), the manager's own persona only frames the plan, and the
+dashboard shows a `team.delegated` chip on each member's task as it works —
+"member · delegated by manager". Each member keeps its own memory scope, so
+a lesson a member learns while working for a manager is still that
+member's lesson, recalled the same way whether it's delegated to or run
+directly.
+
+A `team:` entry is validated the same strictness as `skills:` — never a
+silent surprise:
+
+* an agent listing itself in its own `team:` is disabled, reason on the card;
+* a team member that isn't actually in the roster disables the manager, not
+  a mid-run failure;
+* a **cycle** (A manages B, B manages A — or a longer loop) disables every
+  agent in it;
+* a delegation chain deeper than **2** (a manager whose team member is
+  itself a manager whose team member is itself a manager) is disabled too —
+  legal in principle, but past the point an operator can say who actually
+  did the work.
+
+A disabled manager is still visible in the roster, card and API alike, with
+the reason attached — never removed and never silently downgraded to
+running the goal itself.
+
 ## What's here
 
-Five prebuilt agents, one per shipped sample skill area, each under 1.5 KB:
+Six prebuilt agents, each under 1.5 KB — five workers, one per shipped sample skill area, plus a manager directing two of them:
 
-| Slug | Name / Title | Skills |
+| Slug | Name / Title | Skills / Team |
 |---|---|---|
 | `sales-closer` | Cole, Sales Closer | proposal-generator |
 | `support-rep` | Ava, Support Rep | refund-request-handler |
 | `content-writer` | Max, Content Writer | ad-copy-framework-writer, vsl-script-builder |
 | `researcher` | Nora, Researcher | niche-opportunity-scorer |
 | `ops-assistant` | Sage, Ops Assistant | meeting-agenda-builder, cold-email-sequence-builder |
+| `studio-director` | Remy, Studio Director | **manager** — team: content-writer, researcher |
 
 Plus `_builtin/general-worker.md` — the always-present generalist (`skills: []`,
 falls back to whatever the router hands it) used when no other agent is

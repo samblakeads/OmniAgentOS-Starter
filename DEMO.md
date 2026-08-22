@@ -184,6 +184,37 @@ this agent does can touch anything outside it."
 
 ---
 
+## Beat 4 — Teams, optional (60s: one goal, two specialists, one director)
+
+Not in the ```dod-goals fence — the oracle doesn't parse a manager
+assignment yet (checked `tests/dod/_harness.py` before writing this; only
+`||| dod:` and `||| agent:` exist there today). Cut this beat first if
+you're tight on time; the three numbered goals above are the ones that are
+mechanically proven.
+
+Pick **Studio Director** (Remy) from the **Assign to** picker — not a
+worker this time, a manager — then paste:
+
+```
+Score whether a $149 12-week strength program for women over 40 is a
+promising niche, and separately write 3 Meta feed ad copy variants
+promoting it using the PAS framework.
+```
+
+**What the audience sees:** the Planner lane frames the plan in Remy's
+voice, then the Workers lane shows **two** chips lighting up together —
+Nora (Researcher) and Max (Content Writer) — each carrying a
+"delegated by studio-director" tag, each running under its own skill and
+persona, not Remy's. The deliverable panel assembles both halves — the
+niche score and the ad variants — into one answer.
+
+**What you say:** "This isn't one generalist trying to do two different
+jobs. Remy split the brief, handed each half to the specialist who
+actually does that kind of work, and is reviewing both before it counts
+as done — a director, not a chatbot pretending to be a whole team."
+
+---
+
 ## White-label swap beat (do this between goals, or at the end)
 
 Brand is resolved once at server startup, not on refresh, and

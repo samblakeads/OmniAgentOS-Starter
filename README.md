@@ -126,20 +126,40 @@ reads "built-in · cannot be deleted", and it can't be — only replaced.
 
 ![the Agents roster](docs/screenshot-agents.png)
 
-Five prebuilt agents ship in `agents/`, one per shipped sample skill:
+Six prebuilt agents ship in `agents/` — five workers, one per shipped
+sample skill, plus a manager directing two of them:
 
-| Slug | Name / Title | Skills |
+| Slug | Name / Title | Skills / Team |
 |---|---|---|
 | `sales-closer` | Cole, Sales Closer | proposal-generator |
 | `support-rep` | Ava, Support Rep | refund-request-handler |
 | `content-writer` | Max, Content Writer | ad-copy-framework-writer, vsl-script-builder |
 | `researcher` | Nora, Researcher | niche-opportunity-scorer |
 | `ops-assistant` | Sage, Ops Assistant | meeting-agenda-builder, cold-email-sequence-builder |
+| `studio-director` | Remy, Studio Director | **manager** — team: content-writer, researcher |
 
 CLI: `omniagentos agents list`, `omniagentos agents show <slug>`,
 `omniagentos run --agent <slug> "<goal>"`. See `agents/README.md` for the
 file format. The full **OmniRogue Enterprise** roster ships more prebuilt
 agents on top of the full skills library.
+
+### Bots managing bots
+
+Add `team: [<slug>, ...]` to an agent's front-matter and it stops doing the
+work itself — it becomes a **manager** that splits a goal across its team
+members instead. Each delegated task runs under that member's own persona,
+skills and tools; the manager's own persona only frames the plan and
+reviews what comes back. The Worker lane shows each member's chip with
+"delegated by `<manager>`" as it works, and each member keeps its own
+memory — a lesson learned while delegated-to is still that member's lesson.
+
+A team is validated with the same rigor as a skills list: a manager listing
+itself, a member that isn't in the roster, a cycle (A manages B manages A),
+or a delegation chain deeper than two levels all disable the manager
+(reason on the card, in the API, never a crash) rather than failing partway
+through a run. `studio-director` (Remy) ships as the example — assigned a
+goal, it hands the writing to `content-writer` and the research to
+`researcher`, and reviews both before calling it done.
 
 ## White-label
 
@@ -203,3 +223,8 @@ See `CONTRIBUTING.md`. Bug/feature templates live under
 
 MIT — see `LICENSE`. The OmniRogue name and logo are trademarks of OmniRogue
 Inc and are not covered by the MIT grant; see `assets/TRADEMARK.md`.
+
+**Attribution:** some multi-agent UX ideas (roster cards, delegation
+chips, hierarchy) were inspired by [CopilotKit/OpenBot](https://github.com/CopilotKit/open-bot),
+MIT-licensed. No code was vendored from it — this project's implementation
+is its own.
