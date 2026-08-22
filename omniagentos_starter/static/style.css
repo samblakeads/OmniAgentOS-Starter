@@ -192,3 +192,12 @@ textarea {
   margin: 0 10px 8px; padding: 4px 8px; border: 1px solid var(--ok); border-radius: 999px;
   font-size: 16px; display: inline-block;
 }
+
+/* Header nav: DEMO.md says "click Agents", so there is something to click. */
+.topnav { display: flex; gap: 14px; align-items: center; }
+.topnav .nav-link { color: var(--muted); font-size: 16px; text-decoration: none; border-bottom: 1px solid transparent; }
+.topnav .nav-link:hover, .topnav .nav-link:focus { color: var(--ok); border-bottom-color: var(--ok); }
+
+/* The card you just saved, so a two-step duplicate ends somewhere visible. */
+.agent-card.just-saved { border-color: var(--ok); box-shadow: 0 0 0 2px var(--ok); }
+.link-button[disabled] { color: var(--muted); cursor: not-allowed; text-decoration: none; }

@@ -118,11 +118,13 @@ def test_agents_list_names_every_agent(roster, capsys):
 def test_agents_list_json_is_machine_readable(roster, capsys):
     assert cli.main(["agents", "list", "--json", "--data-dir", str(roster.parent / "var")]) == 0
     listed = json.loads(capsys.readouterr().out)
-    assert {a["id"] for a in listed} >= {"riley", "general-worker"}
+    assert {a["id"] for a in listed} >= {"riley-meal-prep-support", "general-worker"}
 
 
 def test_agents_show_prints_the_persona_and_the_tools(roster, capsys):
-    assert cli.main(["agents", "show", "riley", "--data-dir", str(roster.parent / "var")]) == 0
+    assert cli.main(
+        ["agents", "show", "riley-meal-prep-support", "--data-dir", str(roster.parent / "var")]
+    ) == 0
     out = capsys.readouterr().out
     assert "Calm and exact." in out
     assert "Lead with the clause." in out
@@ -148,3 +150,38 @@ def test_run_with_an_unknown_agent_refuses_before_it_spends_anything(roster, cap
     code = cli.main(["run", "--agent", "nobody", "hello", "--data-dir", str(roster.parent / "var")])
     assert code == 2
     assert "nobody" in capsys.readouterr().err
+
+
+# ------------------------------------------- round 6f: the browser receipt's list
+def test_the_header_has_an_agents_link_that_reaches_the_section():
+    """DEMO.md says "click Agents", so there has to be an Agents to click."""
+    assert 'data-testid="nav-agents"' in INDEX
+    nav = INDEX.split('data-testid="nav-agents"')[1].split("</a>")[0]
+    assert 'href="#agents"' in nav
+    assert 'id="agents"' in INDEX, "the anchor must have somewhere to land"
+
+
+def test_a_builtin_card_shows_a_disabled_delete_that_says_why():
+    """The API's 403 was only visible in a network tab; now it is on the card."""
+    render = APP_JS.split("function renderAgents()")[1].split("function fillAgentPicker()")[0]
+    assert 'data-testid="agent-delete-disabled"' in render
+    assert "cannot be deleted" in render
+    assert "disabled" in render
+    # a non-builtin still gets a real delete
+    assert "data-agent-delete=" in render
+
+
+def test_a_saved_card_is_scrolled_to_and_marked():
+    assert "function highlightAgentCard" in APP_JS
+    assert "scrollIntoView" in APP_JS
+    assert "just-saved" in APP_JS
+    assert ".agent-card.just-saved" in STYLE
+    save = APP_JS.split("function saveAgent(")[1].split("function duplicateAgent")[0]
+    assert "highlightAgentCard" in save, "the highlight must happen after a save, not only on demand"
+
+
+def test_the_form_does_not_derive_its_own_slug():
+    """One slug rule, on the server. A second one in JS is a second answer."""
+    assert "slugify" not in APP_JS
+    save = APP_JS.split("function saveAgent(")[1].split("function duplicateAgent")[0]
+    assert '"slug"' not in save and "slug:" not in save

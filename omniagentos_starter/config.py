@@ -61,6 +61,9 @@ ERROR_TAGS = (
     # an escape: the path was fine, the CAPABILITY was not granted.
     "TOOL_NOT_PERMITTED",
     "AGENT_NOT_FOUND",
+    # A run named an agent that is not in the roster — including a mistyped
+    # @mention, which must never be swept into the prompt as goal text.
+    "UNKNOWN_AGENT",
     "AGENT_EXISTS",
     "AGENT_BUILTIN",
     "REPLAY_FAILED",

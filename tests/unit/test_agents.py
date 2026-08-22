@@ -60,13 +60,15 @@ def test_the_roster_is_a_directory_scan(tmp_path):
     _write(root, "second", AGENT_MD.replace("Support Rep", "Second"))
     roster = load_agents(root, library=load_skills(SKILLS_ROOT))
     assert [a.slug for a in roster.agents] == ["second", "support-rep"]
-    assert roster.count == 2
+    assert roster.file_count == 2
+    assert roster.count == 3, "count includes the built-in, which the API also lists"
     assert roster.integrity()["ok"] is True
 
 
 def test_the_builtin_agent_is_always_present_even_with_no_roster_directory(tmp_path):
     roster = load_agents(tmp_path / "nothing-here")
-    assert roster.count == 0
+    assert roster.file_count == 0
+    assert roster.count == 1, "the built-in is an agent the API lists, so it counts"
     assert roster.builtin is not None
     assert roster.by_id(BUILTIN_AGENT_SLUG) is not None
     assert roster.by_id(BUILTIN_AGENT_SLUG).builtin is True
@@ -186,9 +188,15 @@ def test_a_slug_is_length_capped(tmp_path):
 
 
 def test_slug_from_name_is_what_the_form_will_produce():
+    """The form has two fields; the slug comes from both, as the docs assume."""
+    assert slug_from_name("Riley", "Meal-Prep Support") == "riley-meal-prep-support"
     assert slug_from_name("Riley, Meal-Prep Support") == "riley-meal-prep-support"
     assert slug_from_name("  Sales Closer  ") == "sales-closer"
     assert slug_from_name("!!!") == ""
+    # A name that already ends with the title does not stutter.
+    assert slug_from_name("Riley Meal Prep Support", "Meal-Prep Support") == "riley-meal-prep-support"
+    assert slug_from_name("Ava", "Support Rep") == "ava-support-rep"
+    assert slug_from_name("Riley", "") == "riley"
 
 
 # --------------------------------------------------- D17: tools may only narrow
@@ -276,28 +284,31 @@ def test_create_read_update_duplicate_delete(tmp_path):
         },
         library=library,
     )
-    assert created.slug == "riley"
-    assert (root / "riley.md").is_file()
+    assert created.slug == "riley-meal-prep-support"
+    assert (root / "riley-meal-prep-support.md").is_file()
 
     roster = load_agents(root, library=library)
-    assert roster.by_id("riley").title == "Meal-Prep Support"
-    assert roster.by_id("riley").tools == ["read_file"]
+    assert roster.by_id("riley-meal-prep-support").title == "Meal-Prep Support"
+    assert roster.by_id("riley-meal-prep-support").tools == ["read_file"]
 
     with pytest.raises(AgentError) as exc:
-        store.create({"name": "Riley"}, library=library)
+        store.create({"name": "Riley", "title": "Meal-Prep Support"}, library=library)
     assert exc.value.status == 409
 
-    updated = store.update("riley", {"name": "Riley", "title": "Support Lead", "persona": "p"}, library=library)
+    updated = store.update(
+        "riley-meal-prep-support", {"title": "Support Lead", "persona": "p"}, library=library
+    )
     assert updated.title == "Support Lead"
-    assert load_agents(root, library=library).by_id("riley").title == "Support Lead"
+    assert load_agents(root, library=library).by_id("riley-meal-prep-support").title == "Support Lead"
 
-    clone = store.duplicate("riley", load_agents(root, library=library), {"name": "Riley Two"})
-    assert clone.slug == "riley-two"
+    clone = store.duplicate(
+        "riley-meal-prep-support", load_agents(root, library=library), {"name": "Riley Two"}
+    )
+    assert clone.slug == "riley-two-support-lead"
     assert clone.persona == "p"
-    assert (root / "riley-two.md").is_file()
 
-    assert store.delete("riley-two", load_agents(root, library=library)) == "riley-two"
-    assert not (root / "riley-two.md").exists()
+    assert store.delete(clone.slug, load_agents(root, library=library)) == clone.slug
+    assert not (root / f"{clone.slug}.md").exists()
 
 
 def test_the_builtin_agent_cannot_be_deleted(tmp_path):
@@ -394,14 +405,14 @@ def test_updating_only_one_field_keeps_the_rest(tmp_path):
         },
         library=library,
     )
-    edited = store.update("riley", {"title": "Meal-Prep Support (edited)"}, library=library)
+    edited = store.update("riley-meal-prep-support", {"title": "Meal-Prep Support (edited)"}, library=library)
     assert edited.title == "Meal-Prep Support (edited)"
     assert edited.name == "Riley"
     assert edited.persona == "Calm and exact."
     assert edited.skills == ["refund-request-handler"]
     assert edited.tools == ["read_file"]
     assert edited.body == "Lead with the clause."
-    on_disk = load_agents(root, library=library).by_id("riley")
+    on_disk = load_agents(root, library=library).by_id("riley-meal-prep-support")
     assert on_disk.title == "Meal-Prep Support (edited)"
     assert on_disk.persona == "Calm and exact."
 

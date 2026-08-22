@@ -113,9 +113,25 @@ def safe_agent_slug(raw: str) -> str:
     return reduced.strip("-")[:MAX_SLUG_LEN].strip("-")
 
 
-def slug_from_name(name: str) -> str:
-    """The slug a newly created agent gets from its display name."""
-    return safe_agent_slug(name)
+def slug_from_name(name: str, title: str = "") -> str:
+    """The slug a newly created agent gets from what the form actually collects.
+
+    The form has two fields and the slug used to come from one of them, so
+    "Riley" + "Meal-Prep Support" became `riley` while every doc, demo script and
+    @mention said `riley-meal-prep-support`. A name alone is also the field most
+    likely to collide — an org with two Rileys gets a 409 on the second.
+
+    The title is appended unless the name already ends with it, so a display name
+    that repeats the role ("Riley Meal Prep Support" + "Meal-Prep Support") does
+    not stutter into `riley-meal-prep-support-meal-prep-support`.
+    """
+    base = safe_agent_slug(name)
+    suffix = safe_agent_slug(title)
+    if not suffix or not base:
+        return base or suffix
+    if base == suffix or base.endswith(f"-{suffix}"):
+        return base
+    return safe_agent_slug(f"{base}-{suffix}")
 
 
 def reject_path_shaped(field: str, value: str) -> None:
@@ -305,6 +321,18 @@ class AgentRoster:
 
     @property
     def count(self) -> int:
+        """How many agents there are — including the built-in.
+
+        This is the number the API's `agents` array has in it. It used to count
+        only the roster files, while the array also carried the built-in, so
+        every client reading `count` was told one fewer agent than it had just
+        been handed.
+        """
+        return len(self.agents) + (1 if self.builtin else 0)
+
+    @property
+    def file_count(self) -> int:
+        """Agents that came from roster files — what integrity is about."""
         return len(self.agents)
 
     def by_id(self, slug: str) -> Agent | None:
@@ -338,6 +366,7 @@ class AgentRoster:
         listed = [a.as_dict() for a in self.agents]
         if self.builtin:
             listed.append(self.builtin.as_dict())
+        assert len(listed) == self.count, "count must be the length of the array beside it"
         return {
             "count": self.count,
             "root": self.root,
@@ -467,7 +496,10 @@ class AgentStore:
         reject_path_shaped("name", name)
         if payload.get("slug"):
             reject_path_shaped("slug", payload["slug"])
-        wanted = safe_agent_slug(slug or payload.get("slug") or slug_from_name(name))
+        title = str(payload.get("title") or "").strip()[:MAX_TITLE_CHARS]
+        # An explicit slug always wins; otherwise it is derived from name+title,
+        # which is what the operator actually typed into the form.
+        wanted = safe_agent_slug(slug or payload.get("slug") or slug_from_name(name, title))
         if not wanted:
             raise AgentError(
                 "BAD_REQUEST",
@@ -484,7 +516,7 @@ class AgentStore:
         return Agent(
             slug=wanted,
             name=name,
-            title=str(payload.get("title") or "").strip()[:MAX_TITLE_CHARS],
+            title=title,
             persona=str(payload.get("persona") or "").strip()[:MAX_PERSONA_CHARS],
             skills=[s for s in (str(x).strip() for x in skills) if s][:MAX_AGENT_SKILLS],
             tools=normalise_tools(payload.get("tools")),
@@ -554,6 +586,9 @@ class AgentStore:
             raise AgentError("AGENT_NOT_FOUND", f"no agent {safe_agent_slug(slug)!r}", status=404)
         payload = dict(payload or {})
         name = str(payload.get("name") or f"{source.name} copy")[:MAX_NAME_CHARS]
+        # `<parent>-copy` rather than re-deriving from "<name> copy" + title,
+        # which would bury the "copy" in the middle of a long slug.
+        default_slug = safe_agent_slug(f"{source.slug}-copy") if not payload.get("name") else ""
         clone = self.build(
             {
                 "name": name,
@@ -565,7 +600,7 @@ class AgentStore:
                 "version": payload.get("version", source.version),
                 "body": payload.get("body", source.body),
             },
-            slug=payload.get("slug"),
+            slug=payload.get("slug") or default_slug or None,
         )
         self._require_known_skills(clone, library)
         path = self.path_for(clone.slug)

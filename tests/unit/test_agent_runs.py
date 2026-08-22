@@ -42,6 +42,9 @@ def _events(run, etype):
     return [e["payload"] for e in run.bus.events if e["type"] == etype]
 
 
+# name + title is what the form collects, so the slug is derived from both.
+RILEY_SLUG = "riley-meal-prep-support"
+
 SUPPORT = {
     "name": "Riley",
     "title": "Meal-Prep Support",
@@ -57,22 +60,22 @@ SUPPORT = {
 async def test_a_run_assigned_to_an_agent_announces_who_is_executing(settings, tmp_path):
     script = Script()
     orch = _orch(settings, script, tmp_path, [SUPPORT])
-    run = orch.create(REFUND_GOAL, 1, [], agent_id="riley")
+    run = orch.create(REFUND_GOAL, 1, [], agent_id=RILEY_SLUG)
     await orch.execute(run)
 
     assigned = _events(run, "agent.assigned")
     assert assigned, "a run with an agent must say so before it plans"
-    assert assigned[0]["agent_id"] == "riley"
+    assert assigned[0]["agent_id"] == RILEY_SLUG
     assert assigned[0]["skills"] == ["refund-request-handler"]
     assert assigned[0]["name"] == "Riley"
-    assert run.summary()["agent"] == {"id": "riley", "name": "Riley"}
+    assert run.summary()["agent"] == {"id": RILEY_SLUG, "name": "Riley"}
 
 
 @pytest.mark.asyncio
 async def test_the_agents_persona_and_standing_instructions_reach_the_worker(settings, tmp_path):
     script = Script()
     orch = _orch(settings, script, tmp_path, [SUPPORT])
-    run = orch.create(REFUND_GOAL, 1, [], agent_id="riley")
+    run = orch.create(REFUND_GOAL, 1, [], agent_id=RILEY_SLUG)
     await orch.execute(run)
 
     worker_prompt = script.prompt_text("worker")
@@ -88,7 +91,7 @@ async def test_the_agents_persona_and_standing_instructions_reach_the_worker(set
 async def test_the_planner_is_told_who_will_execute(settings, tmp_path):
     script = Script()
     orch = _orch(settings, script, tmp_path, [SUPPORT])
-    await orch.execute(orch.create(REFUND_GOAL, 1, [], agent_id="riley"))
+    await orch.execute(orch.create(REFUND_GOAL, 1, [], agent_id=RILEY_SLUG))
     planner_prompt = script.prompt_text("planner")
     assert "Riley" in planner_prompt
     assert "Meal-Prep Support" in planner_prompt
@@ -99,7 +102,7 @@ async def test_the_router_may_only_choose_from_the_agents_own_skills(settings, t
     """A support agent handed an ad-copy goal does not get the ad-copy pack."""
     script = Script()
     orch = _orch(settings, script, tmp_path, [SUPPORT])
-    run = orch.create(AD_GOAL, 1, [], agent_id="riley")
+    run = orch.create(AD_GOAL, 1, [], agent_id=RILEY_SLUG)
     await orch.execute(run)
 
     selected = _events(run, "skill.selected")[0]["skill_ids"]
@@ -117,7 +120,7 @@ async def test_the_router_may_only_choose_from_the_agents_own_skills(settings, t
 async def test_an_agents_own_pack_is_still_chosen_when_it_matches(settings, tmp_path):
     script = Script()
     orch = _orch(settings, script, tmp_path, [SUPPORT])
-    run = orch.create(REFUND_GOAL, 1, [], agent_id="riley")
+    run = orch.create(REFUND_GOAL, 1, [], agent_id=RILEY_SLUG)
     await orch.execute(run)
     assert _events(run, "skill.selected")[0]["skill_ids"] == ["refund-request-handler"]
 
@@ -164,7 +167,7 @@ async def test_an_agent_without_write_file_cannot_write_files(settings, tmp_path
     body = "=== FILE: note.md ===\nhello\n=== END FILE ===\ndone"
     script = Script(plan=plan, worker_text=body)
     orch = _orch(settings, script, tmp_path, [SUPPORT])  # tools: read_file, list_files
-    run = orch.create(REFUND_GOAL, 1, [], agent_id="riley")
+    run = orch.create(REFUND_GOAL, 1, [], agent_id=RILEY_SLUG)
     await orch.execute(run)
 
     errors = _events(run, "tool.error")
@@ -184,7 +187,13 @@ async def test_an_agent_with_write_file_still_writes(settings, tmp_path):
     }
     body = "=== FILE: note.md ===\nhello\n=== END FILE ===\ndone"
     script = Script(plan=plan, worker_text=body)
-    writer = {**SUPPORT, "name": "Writer", "tools": ["read_file", "write_file", "list_files"], "skills": []}
+    writer = {
+        **SUPPORT,
+        "name": "Writer",
+        "title": "",
+        "tools": ["read_file", "write_file", "list_files"],
+        "skills": [],
+    }
     orch = _orch(settings, script, tmp_path, [writer])
     run = orch.create(REFUND_GOAL, 1, [], agent_id="writer")
     await orch.execute(run)
@@ -195,17 +204,37 @@ async def test_an_agent_with_write_file_still_writes(settings, tmp_path):
 @pytest.mark.asyncio
 async def test_an_at_slug_prefix_assigns_the_run_and_leaves_the_goal_clean(settings, tmp_path):
     orch = _orch(settings, Script(), tmp_path, [SUPPORT])
-    run = orch.create("@riley " + REFUND_GOAL)
-    assert run.agent_id == "riley"
+    run = orch.create(f"@{RILEY_SLUG} " + REFUND_GOAL)
+    assert run.agent_id == RILEY_SLUG
     assert run.goal == REFUND_GOAL
     assert not run.goal.startswith("@")
 
 
 @pytest.mark.asyncio
-async def test_an_at_word_that_is_not_an_agent_is_left_alone(settings, tmp_path):
-    """Eating the first word of somebody's goal is worse than not supporting it."""
+async def test_an_at_mention_that_is_not_an_agent_is_refused(settings, tmp_path):
+    """A mistyped mention fails at the door instead of becoming goal text.
+
+    This reverses an earlier choice, and the reason is a browser receipt: a stale
+    `@riley-meal-prep-support` ran unassigned, nobody was told, and the literal
+    text was swept into the prompt and came back out as "Dear Riley Meal Prep
+    Support customer," in a reply drafted for a real customer. Leaving an
+    unresolved mention in place is not the conservative option — it is the one
+    that ships nonsense to somebody's inbox.
+    """
+    from omniagentos_starter.engine import UnknownAgent
+
     orch = _orch(settings, Script(), tmp_path, [SUPPORT])
-    goal = "@channel please summarise the outage"
+    with pytest.raises(UnknownAgent) as exc:
+        orch.create("@channel please summarise the outage")
+    assert exc.value.slug == "channel"
+    assert "channel" in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_an_at_sign_that_is_not_a_mention_is_left_alone(settings, tmp_path):
+    """Only a LEADING @token is a mention; an address mid-goal is just text."""
+    orch = _orch(settings, Script(), tmp_path, [SUPPORT])
+    goal = "Draft a reply and copy support@example.com on it"
     run = orch.create(goal)
     assert run.agent_id == ""
     assert run.goal == goal
@@ -213,9 +242,9 @@ async def test_an_at_word_that_is_not_an_agent_is_left_alone(settings, tmp_path)
 
 @pytest.mark.asyncio
 async def test_an_explicit_agent_id_wins_over_a_prefix(settings, tmp_path):
-    orch = _orch(settings, Script(), tmp_path, [SUPPORT, {**SUPPORT, "name": "Other"}])
-    run = orch.create("@other " + REFUND_GOAL, agent_id="riley")
-    assert run.agent_id == "riley"
+    orch = _orch(settings, Script(), tmp_path, [SUPPORT, {**SUPPORT, "name": "Other", "title": ""}])
+    run = orch.create("@other " + REFUND_GOAL, agent_id=RILEY_SLUG)
+    assert run.agent_id == RILEY_SLUG
 
 
 # ------------------------------------------------------------------ memory
@@ -223,28 +252,28 @@ async def test_an_explicit_agent_id_wins_over_a_prefix(settings, tmp_path):
 async def test_a_lesson_is_stamped_with_the_agent_that_learned_it(settings, tmp_path):
     script = Script()
     orch = _orch(settings, script, tmp_path, [SUPPORT])
-    run = orch.create(REFUND_GOAL, 1, [], agent_id="riley")
+    run = orch.create(REFUND_GOAL, 1, [], agent_id=RILEY_SLUG)
     await orch.execute(run)
     saved = _events(run, "lesson.saved")
-    assert saved and saved[0]["agent_id"] == "riley"
-    assert orch.memory.all_lessons()[0]["agent_id"] == "riley"
+    assert saved and saved[0]["agent_id"] == RILEY_SLUG
+    assert orch.memory.all_lessons()[0]["agent_id"] == RILEY_SLUG
 
 
 @pytest.mark.asyncio
 async def test_a_second_run_by_the_same_agent_recalls_its_own_lesson(settings, tmp_path):
     script = Script()
     orch = _orch(settings, script, tmp_path, [SUPPORT])
-    first = orch.create(REFUND_GOAL, 1, [], agent_id="riley")
+    first = orch.create(REFUND_GOAL, 1, [], agent_id=RILEY_SLUG)
     await orch.execute(first)
     assert _events(first, "lesson.saved")
 
-    second = orch.create(REFUND_GOAL, 1, [], agent_id="riley")
+    second = orch.create(REFUND_GOAL, 1, [], agent_id=RILEY_SLUG)
     await orch.execute(second)
     recalled = _events(second, "memory.recalled")[0]
     assert recalled["matched"] >= 1
-    assert recalled["agent_id"] == "riley"
+    assert recalled["agent_id"] == RILEY_SLUG
     assert recalled["from_agent"] >= 1
-    assert recalled["lessons"][0]["agent_id"] == "riley"
+    assert recalled["lessons"][0]["agent_id"] == RILEY_SLUG
 
 
 @pytest.mark.asyncio
@@ -254,11 +283,11 @@ async def test_an_agent_prefers_its_own_lessons_but_still_sees_the_shared_pool(s
     memory.create_run("r-global", REFUND_GOAL)
     memory.finish_run("r-global", "done", verified=True)
     memory.save_lesson("r-global", "GLOBAL LESSON", [], REFUND_GOAL)
-    memory.create_run("r-riley", REFUND_GOAL, agent_id="riley")
+    memory.create_run("r-riley", REFUND_GOAL, agent_id=RILEY_SLUG)
     memory.finish_run("r-riley", "done", verified=True)
-    memory.save_lesson("r-riley", "RILEY LESSON", [], REFUND_GOAL, agent_id="riley")
+    memory.save_lesson("r-riley", "RILEY LESSON", [], REFUND_GOAL, agent_id=RILEY_SLUG)
 
-    mine = memory.recall(REFUND_GOAL, k=2, agent_id="riley")
+    mine = memory.recall(REFUND_GOAL, k=2, agent_id=RILEY_SLUG)
     assert mine[0].text == "RILEY LESSON", [lesson.text for lesson in mine]
     assert "GLOBAL LESSON" in [lesson.text for lesson in mine], "the shared pool is still reachable"
 
@@ -321,7 +350,7 @@ async def test_the_agents_own_skills_reach_the_worker_even_when_the_goal_words_i
     """
     writer = {
         "name": "Max",
-        "title": "Content Writer",
+        "title": "",
         "persona": "Writes like a human.",
         "skills": ["vsl-script-builder"],
         "tools": ["read_file"],

@@ -20,6 +20,10 @@ from omniagentos_starter.config import Settings
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SKILLS_ROOT = REPO_ROOT / "skills"
 
+# name + title together make the slug, so the docs' `@riley-meal-prep-support`
+# is what a form filled in with "Riley" / "Meal-Prep Support" actually produces.
+RILEY_SLUG = "riley-meal-prep-support"
+
 RILEY = {
     "name": "Riley",
     "title": "Meal-Prep Support",
@@ -50,10 +54,12 @@ def client(tmp_path):
 # --------------------------------------------------------------------- read
 def test_the_roster_lists_the_builtin_even_when_nothing_has_been_created(client):
     body = client.get("/api/agents").json()
-    assert body["count"] == 0
     ids = [a["id"] for a in body["agents"]]
     assert BUILTIN_AGENT_SLUG in ids
     assert body["items"] == body["agents"]
+    # count is the length of the array beside it — it used to exclude the
+    # built-in that the array included, so every client was told one too few.
+    assert body["count"] == len(body["agents"]) == 1
 
 
 def test_health_reports_how_many_agents_are_loaded(client):
@@ -71,18 +77,20 @@ def test_create_writes_a_file_and_appears_in_the_roster(client):
     created = client.post("/api/agents", json=RILEY)
     assert created.status_code == 201, created.text
     body = created.json()
-    assert body["id"] == "riley"
+    assert body["id"] == RILEY_SLUG
     assert body["title"] == "Meal-Prep Support"
     assert body["tools"] == ["read_file", "list_files"]
 
-    path = client.roster_root / "riley.md"
+    path = client.roster_root / f"{RILEY_SLUG}.md"
     assert path.is_file()
     text = path.read_text(encoding="utf-8")
     assert "name: Riley" in text
     assert "Lead with the policy clause." in text
 
-    assert "riley" in [a["id"] for a in client.get("/api/agents").json()["agents"]]
-    assert client.get("/api/agents/riley").json()["persona"] == RILEY["persona"]
+    listing = client.get("/api/agents").json()
+    assert RILEY_SLUG in [a["id"] for a in listing["agents"]]
+    assert listing["count"] == len(listing["agents"])
+    assert client.get(f"/api/agents/{RILEY_SLUG}").json()["persona"] == RILEY["persona"]
 
 
 def test_creating_the_same_agent_twice_is_a_409(client):
@@ -151,10 +159,10 @@ def test_a_persona_that_tries_to_break_out_is_stored_and_rendered_escaped(client
 # ------------------------------------------------------- update / duplicate
 def test_update_round_trips(client):
     client.post("/api/agents", json=RILEY)
-    updated = client.put("/api/agents/riley", json={**RILEY, "title": "Support Lead"})
+    updated = client.put(f"/api/agents/{RILEY_SLUG}", json={"title": "Support Lead"})
     assert updated.status_code == 200
     assert updated.json()["title"] == "Support Lead"
-    assert client.get("/api/agents/riley").json()["title"] == "Support Lead"
+    assert client.get(f"/api/agents/{RILEY_SLUG}").json()["title"] == "Support Lead"
 
 
 def test_updating_something_that_is_not_there_is_a_404(client):
@@ -163,34 +171,37 @@ def test_updating_something_that_is_not_there_is_a_404(client):
 
 def test_duplicate_makes_a_second_agent_with_the_same_shape(client):
     client.post("/api/agents", json=RILEY)
-    dup = client.post("/api/agents/riley/duplicate", json={"name": "Riley Two"})
+    dup = client.post(f"/api/agents/{RILEY_SLUG}/duplicate", json={"name": "Riley Two"})
     assert dup.status_code == 201
     body = dup.json()
-    assert body["id"] == "riley-two"
+    assert body["id"] == "riley-two-meal-prep-support"
     assert body["persona"] == RILEY["persona"]
     assert body["skills"] == RILEY["skills"]
-    assert (client.roster_root / "riley-two.md").is_file()
+    assert (client.roster_root / f"{body['id']}.md").is_file()
 
 
 def test_duplicate_with_no_body_still_works(client):
     client.post("/api/agents", json=RILEY)
-    dup = client.post("/api/agents/riley/duplicate")
+    dup = client.post(f"/api/agents/{RILEY_SLUG}/duplicate")
     assert dup.status_code == 201
-    assert dup.json()["id"] == "riley-copy"
+    # `<parent>-copy`, so the "copy" is legible instead of buried mid-slug.
+    assert dup.json()["id"] == f"{RILEY_SLUG}-copy"
 
 
 def test_duplicating_onto_an_existing_name_is_a_409(client):
     client.post("/api/agents", json=RILEY)
     client.post("/api/agents", json={**RILEY, "name": "Riley Two"})
-    assert client.post("/api/agents/riley/duplicate", json={"name": "Riley Two"}).status_code == 409
+    assert client.post(
+        f"/api/agents/{RILEY_SLUG}/duplicate", json={"name": "Riley Two"}
+    ).status_code == 409
 
 
 # ------------------------------------------------------------------ delete
 def test_delete_removes_the_file(client):
     client.post("/api/agents", json=RILEY)
-    assert client.delete("/api/agents/riley").status_code == 200
-    assert not (client.roster_root / "riley.md").exists()
-    assert client.get("/api/agents/riley").status_code == 404
+    assert client.delete(f"/api/agents/{RILEY_SLUG}").status_code == 200
+    assert not (client.roster_root / f"{RILEY_SLUG}.md").exists()
+    assert client.get(f"/api/agents/{RILEY_SLUG}").status_code == 404
 
 
 def test_deleting_a_builtin_is_a_403(client):
@@ -208,17 +219,20 @@ def test_deleting_something_that_is_not_there_is_a_404(client):
 # ------------------------------------------------------------- runs + agent
 def test_a_run_can_be_created_against_an_agent(client):
     client.post("/api/agents", json=RILEY)
-    created = client.post("/api/runs", json={"goal": "Handle a refund request", "agent_id": "riley"})
+    created = client.post(
+        "/api/runs", json={"goal": "Handle a refund request", "agent_id": RILEY_SLUG}
+    )
     assert created.status_code == 201, created.text
     body = created.json()
-    assert body["agent_id"] == "riley"
-    assert body["agent"] == {"id": "riley", "name": "Riley"}
+    assert body["agent_id"] == RILEY_SLUG
+    assert body["agent"] == {"id": RILEY_SLUG, "name": "Riley"}
 
 
 def test_a_run_against_an_unknown_agent_is_a_400(client):
     resp = client.post("/api/runs", json={"goal": "hello", "agent_id": "nobody"})
     assert resp.status_code == 400
-    assert resp.json()["error_tag"] == "BAD_REQUEST"
+    assert resp.json()["error_tag"] == "UNKNOWN_AGENT"
+    assert resp.json()["agent_id"] == "nobody"
     assert "nobody" in resp.json()["message"]
 
 
@@ -230,9 +244,26 @@ def test_a_run_with_no_agent_says_so_plainly(client):
 
 def test_an_at_slug_prefix_in_the_goal_assigns_the_run(client):
     client.post("/api/agents", json=RILEY)
-    body = client.post("/api/runs", json={"goal": "@riley handle a refund request"}).json()
-    assert body["agent_id"] == "riley"
+    body = client.post(
+        "/api/runs", json={"goal": f"@{RILEY_SLUG} handle a refund request"}
+    ).json()
+    assert body["agent_id"] == RILEY_SLUG
+    # The mention is STRIPPED: it must never reach a prompt as goal text.
     assert body["goal"] == "handle a refund request"
+    assert "@" not in body["goal"]
+
+
+def test_an_at_mention_nobody_can_resolve_stops_the_run_at_the_door(client):
+    """A stale mention leaked into a customer-facing reply. Never again."""
+    resp = client.post("/api/runs", json={"goal": "@riley-meal-prep-support draft the reply"})
+    assert resp.status_code == 400, resp.text
+    body = resp.json()
+    assert body["error_tag"] == "UNKNOWN_AGENT"
+    assert "riley-meal-prep-support" in body["message"]
+    assert body["agent_id"] == "riley-meal-prep-support"
+    # ...and no run was created to leak it into.
+    runs = client.get("/api/runs").json()["runs"]
+    assert not any("riley-meal-prep-support" in (r.get("goal") or "") for r in runs)
 
 
 def test_token_auth_covers_the_agent_routes(tmp_path):

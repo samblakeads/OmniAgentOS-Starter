@@ -216,10 +216,15 @@
       var broken = a.enabled === false
         ? '<div class="agent-meta">✕ disabled — ' + esc((a.errors || []).join("; ")) + "</div>"
         : "";
+      // A built-in shows a DISABLED delete control that says why. Silently
+      // omitting the button left the operator with no explanation on screen —
+      // the API's 403 ("ships with the package and cannot be deleted") was only
+      // visible to somebody reading the network tab.
       var actions = '<button type="button" class="link-button" data-agent-edit="' + esc(a.id) + '">edit</button>' +
         '<button type="button" class="link-button" data-agent-duplicate="' + esc(a.id) + '">duplicate</button>' +
         (a.builtin
-          ? '<span class="muted">built-in</span>'
+          ? '<button type="button" class="link-button" data-testid="agent-delete-disabled" ' +
+            'disabled title="the built-in agent ships with the package">built-in · cannot be deleted</button>'
           : '<button type="button" class="link-button" data-agent-delete="' + esc(a.id) + '">delete</button>');
       return '<article class="agent-card' + (a.enabled === false ? " disabled" : "") +
         '" data-testid="agent-card" data-agent="' + esc(a.id) + '">' +
@@ -243,6 +248,15 @@
           (a.title ? " — " + esc(a.title) : "") + "</option>";
       }).join("");
     if (chosen) { picker.value = chosen; }
+  }
+
+  function highlightAgentCard(slug) {
+    if (!slug) { return; }
+    var card = document.querySelector('[data-agent="' + String(slug).replace(/"/g, "") + '"]');
+    if (!card) { return; }
+    card.classList.add("just-saved");
+    if (card.scrollIntoView) { card.scrollIntoView({ block: "center" }); }
+    window.setTimeout(function () { card.classList.remove("just-saved"); }, 4000);
   }
 
   function agentById(slug) {
@@ -324,6 +338,10 @@
       loadAgents().then(function () {
         var picker = el("agent-picker");
         if (picker && res.body.id) { picker.value = res.body.id; }
+        // Duplicate is a two-step flow (prefill, then Save), so the result has
+        // to be findable: scroll the new card into view and mark it, or the
+        // operator is left scanning a roster for what just happened.
+        highlightAgentCard(res.body.id);
       });
     }).catch(function (err) {
       el("agent-save").disabled = false;

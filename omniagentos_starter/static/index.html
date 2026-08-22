@@ -16,6 +16,9 @@
       <p class="tagline">Hand it a goal. A team of agents plans, executes, critiques, verifies — and keeps going until it's done.</p>
     </div>
   </div>
+  <nav class="topnav" aria-label="sections">
+    <a id="nav-agents" data-testid="nav-agents" class="nav-link" href="#agents">Agents</a>
+  </nav>
   <div class="health" id="health-strip">
     <span class="chip" id="chip-provider">◌ checking provider…</span>
     <span class="chip" id="chip-skills">◌ skills</span>
@@ -110,7 +113,7 @@
 
   <section id="critic-cards" class="critic-cards" aria-label="critic findings"></section>
 
-  <section class="panel agents-panel">
+  <section class="panel agents-panel" id="agents">
     <div class="panel-head">
       <h2><span aria-hidden="true">👤</span> Agents</h2>
       <button id="agent-create" data-testid="agent-create" class="secondary" type="button">New agent</button>

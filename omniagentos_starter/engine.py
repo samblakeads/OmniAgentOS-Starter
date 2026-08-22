@@ -349,6 +349,24 @@ class RunLimit(Exception):
     """Too many runs already in flight."""
 
 
+class UnknownAgent(ValueError):
+    """A run named an agent the roster does not have.
+
+    A ValueError so that every existing caller still treats it as a bad request;
+    the tag and the slug are carried so the API can name what was not found
+    rather than saying "bad request" about a typo the operator can see.
+    """
+
+    error_tag = "UNKNOWN_AGENT"
+
+    def __init__(self, slug: str, detail: str = ""):
+        self.slug = str(slug)
+        self.detail = detail
+        super().__init__(
+            detail or f"no agent {self.slug!r} in the roster — check the Agents list for the exact id"
+        )
+
+
 # ----------------------------------------------------------------- engine ---
 class Engine:
     """Executes one run. Construct per run; the Orchestrator owns the fleet."""
@@ -1583,28 +1601,37 @@ class Orchestrator:
             return None
         agent = self.roster.by_id(wanted)
         if agent is None:
-            raise ValueError(f"no agent {wanted!r} in the roster")
+            raise UnknownAgent(wanted)
         if not agent.enabled:
-            raise ValueError(
-                f"agent {wanted!r} is disabled: " + "; ".join(agent.errors or ["failed integrity"])
+            raise UnknownAgent(
+                wanted,
+                f"agent {wanted!r} is disabled: " + "; ".join(agent.errors or ["failed integrity"]),
             )
         return agent
 
     def split_agent_prefix(self, goal: str) -> tuple[str, str]:
         """`@slug do the thing` assigns the run to `slug`, same as the picker.
 
-        Only a slug that is actually in the roster is treated as an assignment.
-        A goal that merely begins with an @-word — a handle, an email, a mention —
-        keeps its text, because silently eating the first word of somebody's goal
-        is worse than not supporting the shorthand.
+        A leading @-token is ALWAYS read as an agent mention, and one that does
+        not resolve is an error — not a shrug.
+
+        This used to leave an unresolved mention in place on the theory that
+        eating the first word of somebody's goal is worse than not supporting the
+        shorthand. A browser receipt showed what that costs: a stale
+        `@riley-meal-prep-support` ran unassigned, nobody was told, and the
+        literal text was swept into the prompt and out the other side as "Dear
+        Riley Meal Prep Support customer," in a reply drafted for a real
+        customer. A mistyped mention has to fail loudly at the door; it must
+        never become part of the deliverable.
         """
         match = re.match(r"^\s*@([A-Za-z0-9_-]{1,64})\b[\s,:]*", goal or "")
         if not match:
             return goal, ""
-        slug = safe_agent_slug(match.group(1))
+        raw = match.group(1)
+        slug = safe_agent_slug(raw)
         agent = self.roster.by_id(slug) if slug else None
         if agent is None:
-            return goal, ""
+            raise UnknownAgent(raw)
         return goal[match.end() :].lstrip(), agent.slug
 
     @property

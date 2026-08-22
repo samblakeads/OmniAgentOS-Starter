@@ -34,7 +34,7 @@ from .config import (
     skills_dir,
     static_dir,
 )
-from .engine import EventBus, Orchestrator, RunLimit, RunState
+from .engine import EventBus, Orchestrator, RunLimit, RunState, UnknownAgent
 from .llm import LLMClient
 from .redact import WorkspaceEscape, redact, register_secret
 from .replay import ReplayUnavailable, replay_into, replay_metadata
@@ -433,6 +433,13 @@ def create_app(settings: Settings | None = None, orchestrator: Orchestrator | No
             run = orch.create(req.goal, req.max_rounds, req.criteria(), agent_id=req.agent_id)
         except RunLimit as exc:
             return JSONResponse(redact({"error_tag": "RUN_LIMIT", "message": str(exc)}), status_code=429)
+        except UnknownAgent as exc:
+            # Named, not generic: the operator can see the slug they typed and
+            # compare it with the Agents list. The run never starts.
+            return JSONResponse(
+                redact({"error_tag": exc.error_tag, "message": str(exc), "agent_id": exc.slug}),
+                status_code=400,
+            )
         except ValueError as exc:
             return JSONResponse(redact({"error_tag": "BAD_REQUEST", "message": str(exc)}), status_code=400)
         orch.start(run)
