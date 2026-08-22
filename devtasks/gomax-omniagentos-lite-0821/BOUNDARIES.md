@@ -194,23 +194,24 @@ in this working tree.
   wording for the cases D17 DOES cover — that fallback needs a coordinator
   decision if it is ever actually hit, not a silent oracle downgrade.
 - **D18 UI task-member attribution — `[data-testid="task-member"]`, PER-TASK
-  JOIN (Grok round-6 audit tightening):** one element per delegated task in
-  the run's detail/timeline view, inner text containing the delegated
-  member's slug or display name. Existence-on-the-page alone is
-  insufficient — a mismatched join (e.g. markers rendered in
-  `team.delegated` order while task rows render in plan order) would pass
-  that weaker check. The oracle now requires selecting the SPECIFIC task
-  row via `[data-task-id="<task_id>"] [data-testid="task-member"]` and
-  checking that its own text names that task's own delegated member, plus
-  a reverse check that no task row names a DIFFERENT member than its own
-  attribution. **BINDING pin, read from the current `static/app.js`
-  (`renderTasks()`, `#workers-body .task` divs, ~line 762-770):** the
-  `.task` row does **not** currently carry any task-id attribute at all —
-  neither `renderTasks()`'s primary build nor the second `.task`-building
-  path (~line 926) sets one. Implementers must add
-  `data-task-id="<task_id>"` to the `.task` div (both render paths) for
-  this selector to resolve; until then this portion of D18 is
-  correctly/expectedly red.
+  JOIN (Grok round-6 audit tightening; IMPLEMENTED per Grok round-7 F12):**
+  one element per delegated task in the run's detail/timeline view, inner
+  text containing the delegated member's slug or display name.
+  Existence-on-the-page alone is insufficient — a mismatched join (e.g.
+  markers rendered in `team.delegated` order while task rows render in
+  plan order) would pass that weaker check. The oracle requires selecting
+  the SPECIFIC task row via
+  `[data-task-id="<task_id>"] [data-testid="task-member"]` and checking
+  that its own text names that task's own delegated member, plus a
+  reverse check that no task row names a DIFFERENT member than its own
+  attribution. **BINDING contract, current `static/app.js`
+  (`renderTasks()`, `#workers-body .task` divs, ~line 762-770, and the
+  second `.task`-building path ~line 926 — commit b32b546):** both render
+  paths now emit `data-task-id="<task_id>"` on the `.task` row itself,
+  with that task's `[data-testid="task-member"]` marker nested inside it —
+  the selector above is live and binding; any future change to either
+  render path must keep `data-task-id` on the row and the member marker
+  nested inside it, or this join breaks silently.
 - **D18 UI run-scoping — `[data-testid="agent-runs-filter"]`:** visible
   after clicking an agent's roster card; inner text contains a run COUNT
   (parsed via `\d+`) that must equal `len(GET /api/runs?agent_id=<slug>
