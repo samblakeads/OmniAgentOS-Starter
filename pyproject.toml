@@ -42,6 +42,21 @@ Homepage = "https://github.com/omnirogue/OmniAgentOS-Starter"
 [tool.setuptools.packages.find]
 include = ["omniagentos_starter*"]
 
+# What ships inside the package: the dashboard, the recorded demo run, and the
+# built-in fallback skill pack — everything a run needs to work at all.
+#
+# `skills/` and `assets/` deliberately stay at the repo root, and therefore do
+# NOT travel in a wheel: package-data can only reach inside the package tree.
+# That is the honest shape of this project. The skill library is meant to be
+# read and edited — you add packs, you delete packs, the loader is a directory
+# scan — and a copy buried in site-packages would be a second source of truth
+# that silently drifts from the one you are editing. Install from a checkout
+# (`pip install -e .`, or `./start.sh`, which is what the README and DEMO.md
+# tell you to do) and both are found.
+#
+# A wheel install degrades visibly rather than mysteriously: /api/health reports
+# skills: 0, the dashboard says the built-in general-assistant pack is in use,
+# and runs still complete. See evidence/u2-handoff-to-u1.md for the measurement.
 [tool.setuptools.package-data]
 omniagentos_starter = [
   "static/*",
