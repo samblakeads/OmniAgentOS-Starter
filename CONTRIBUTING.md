@@ -5,7 +5,7 @@ Thanks for considering a contribution to OmniAgentOS Starter.
 ## Getting set up
 
 ```bash
-git clone https://github.com/omnirogue/OmniAgentOS-Starter.git
+git clone https://github.com/samblakeads/OmniAgentOS-Starter.git
 cd OmniAgentOS-Starter
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"

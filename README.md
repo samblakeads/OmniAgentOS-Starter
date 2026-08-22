@@ -1,5 +1,7 @@
 # OmniAgentOS Starter
 
+[![CI](https://github.com/samblakeads/OmniAgentOS-Starter/actions/workflows/ci.yml/badge.svg)](https://github.com/samblakeads/OmniAgentOS-Starter/actions/workflows/ci.yml)
+
 **An assistant waits for you: you prompt it, it answers, it stops. OmniAgentOS
 Starter is different — hand it a goal, and a team of agents plans the work,
 does the work, checks each other, and keeps going until it's done. On your
@@ -39,7 +41,7 @@ to the best-fit agent for the job.
 ## Quickstart
 
 ```bash
-git clone https://github.com/omnirogue/OmniAgentOS-Starter.git
+git clone https://github.com/samblakeads/OmniAgentOS-Starter.git
 cd OmniAgentOS-Starter
 ./start.sh          # macOS / Linux
 # .\start.ps1        # Windows
