@@ -14,6 +14,10 @@
 #   - tests/unit/test_redact.py:        fake keys like "xai-live-key-9876543210"
 #   - tests/unit/conftest.py:           TEST_KEY = "xai-unit-test-key-abcdef0123456789"
 #   - devtasks/**/BOUNDARIES.md, evidence/*: document the same planted key
+#   - scripts/lint_skills.py:           _SELF_TEST_FIXTURES — synthetic key
+#     shapes (xai-, sk-, Bearer, api_key=, hex/base64 blobs) the leak
+#     scanner runs against itself on every invocation to prove it still
+#     catches them (B5-F6 regression guard); none are real credentials.
 
 [extend]
 useDefault = true
@@ -25,5 +29,6 @@ paths = [
   '''tests/dod/test_d10_invariants\.py''',
   '''tests/unit/test_redact\.py''',
   '''tests/unit/conftest\.py''',
+  '''scripts/lint_skills\.py''',
   '''devtasks/.*''',
 ]
