@@ -1,0 +1,55 @@
+dod.sh sha256 (after round-4 parallel-scheduling fix): c520356e5e1dfe29dc1679c950510851e94ca8ae4beffd8bbe873a35d8d0077e
+
+NON-WEAKENING STATEMENT
+------------------------
+Which checks changed: none. Every Dn (D1-D14) still runs the exact same
+tests/dod/test_dXX_*.py file via the exact same
+"$PY -u -m pytest --rootdir $REPO_ROOT -q --tb=line <file>" invocation as
+before, with the same evidence file (evidence/dN-pytest.txt), the same
+PASS/FAIL determination (pytest exit code 0 == PASS, non-zero == FAIL),
+the same RIDERS self-check as the FIRST action (missing test files,
+MockTransport/monkeypatch/respx/api.x.ai-stub grep on the LIVE-BOUNDARY
+files, BOUNDARIES.md empty-unmocked-check gate), and the same
+evidence/audit-verdict.txt "Verified Complete" + auditor-lineage exit
+gate. Only the SCHEDULING changed: the 14 checks are now grouped into 5
+independent groups (A: D2 D4 D5; B: D6; C: D9 D12; D: D3 D7 D13; E: D1 D8
+D10 D11 D14) that run concurrently with a hard cap of 3 groups in flight
+at once, instead of all 14 running strictly serially. Each Dn still spawns
+its own pytest process, its own tmp data-dir, and its own ephemeral
+"serve --port 0" server (spawn_serve() in _harness.py mints a fresh
+tempdir + port per process every time), so concurrent groups cannot
+collide on state, port, or a shared MAX_CONCURRENT_RUNS ceiling -- each
+group is talking to a wholly distinct server process. All 14 PASS/FAIL
+lines are still collected from per-Dn status files and printed once each,
+IN ORDER D1..D14, only after every group has finished (never interleaved,
+never omitted -- a status file that a group failed to write, e.g. because
+the 850s watchdog killed it, reads as FAIL rather than being silently
+skipped). A repair alongside this change: the watchdog subshell and its
+job-slot were previously (incorrectly) included in the group-completion
+"wait" and the MAX_CONC job count, which floored total runtime at the
+watchdog's own 850s sleep even when every real check had long finished --
+fixed by tracking group PIDs explicitly and excluding the watchdog PID
+from both the concurrency count and the wait list.
+
+FULL RUN (key sourced via: set -a; source ~/.config/omni/connections.env; set +a)
+----------------------------------------------------------------------------
+Wall time: 260.76s total (bash time: 16.69s user 9.13s system 9% cpu
+4:20.76 total), well under the 900s budget.
+Exit code: 1 -- CORRECT/EXPECTED at this stage: all 14 Dn lines are PASS,
+but evidence/audit-verdict.txt does not exist yet (it is written by a
+LATER unit, U5 Audit; dod.sh only ever checks for it, never writes it).
+
+PASS D1
+PASS D2
+PASS D3
+PASS D4
+PASS D5
+PASS D6
+PASS D7
+PASS D8
+PASS D9
+PASS D10
+PASS D11
+PASS D12
+PASS D13
+PASS D14
