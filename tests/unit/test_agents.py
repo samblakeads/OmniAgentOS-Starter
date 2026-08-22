@@ -128,14 +128,48 @@ def test_unreadable_front_matter_is_an_error_not_a_healthy_agent(tmp_path):
     assert roster.usable("broken") is None
 
 
-def test_two_files_claiming_one_slug_do_not_both_load(tmp_path):
+def test_two_files_claiming_one_slug_are_both_listed_and_one_is_disabled(tmp_path):
+    """Omitting the loser left a file on disk that the product did not have.
+
+    The operator could see it in the directory and never in the UI, and which
+    one won was decided by filename sort order.
+    """
     root = tmp_path / "agents"
     _write(root, "dup")
     (root / "nested").mkdir()
     (root / "nested" / "dup.md").write_text(AGENT_MD, encoding="utf-8")
     roster = load_agents(root, library=load_skills(SKILLS_ROOT))
-    assert [a.slug for a in roster.agents] == ["dup"]
-    assert any("duplicate" in e for e in roster.errors)
+
+    listed = [a for a in roster.agents if a.slug == "dup"]
+    assert len(listed) == 2, "both files must appear"
+    assert sum(1 for a in listed if a.enabled) == 1, "exactly one may run"
+    loser = next(a for a in listed if not a.enabled)
+    assert any("duplicate slug of" in e for e in loser.errors), loser.errors
+    assert roster.by_id("dup").enabled is True, "by_id must hand back the one that runs"
+    assert roster.integrity()["ok"] is False
+    assert "dup" in roster.integrity()["duplicate_slugs"]
+
+
+def test_the_canonical_filename_wins_a_slug_clash(tmp_path):
+    """`<slug>.md` is what AgentStore writes, so a drop-in cannot displace it."""
+    root = tmp_path / "agents"
+    root.mkdir(parents=True)
+    # `sales-closer-dup.md` sorts BEFORE `sales-closer.md`, so sort order alone
+    # would have handed the id to the impostor.
+    (root / "sales-closer-dup.md").write_text(
+        "---\nname: Impostor\nslug: sales-closer\n---\nbody\n", encoding="utf-8"
+    )
+    (root / "sales-closer.md").write_text("---\nname: Cole\n---\nbody\n", encoding="utf-8")
+    roster = load_agents(root)
+
+    winner = roster.by_id("sales-closer")
+    assert winner.name == "Cole", "the file named after the slug must own the slug"
+    assert winner.enabled is True
+    impostor = next(a for a in roster.agents if a.name == "Impostor")
+    assert impostor.enabled is False
+    assert "duplicate slug of sales-closer.md" in impostor.errors[0]
+    assert impostor.as_dict()["file"] == "sales-closer-dup.md"
+    assert impostor.as_dict()["file"] != winner.as_dict()["file"]
 
 
 def test_a_roster_file_cannot_shadow_the_builtin(tmp_path):
@@ -144,6 +178,10 @@ def test_a_roster_file_cannot_shadow_the_builtin(tmp_path):
     roster = load_agents(root, library=load_skills(SKILLS_ROOT))
     assert roster.by_id(BUILTIN_AGENT_SLUG).builtin is True
     assert any("duplicate" in e for e in roster.errors)
+    # ...and the shadow file is visible-but-disabled rather than omitted.
+    shadow = next(a for a in roster.agents if a.slug == BUILTIN_AGENT_SLUG)
+    assert shadow.enabled is False
+    assert "duplicate slug of" in shadow.errors[0]
 
 
 # ------------------------------------------------------- D17: slug is a path

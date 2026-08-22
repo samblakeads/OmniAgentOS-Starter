@@ -395,6 +395,15 @@ def create_app(settings: Settings | None = None, orchestrator: Orchestrator | No
 
     @api.put("/agents/{slug}")
     async def update_agent(slug: str, request: Request) -> JSONResponse:
+        """Partial edit. Omitted fields keep their value.
+
+        A `slug` in the body is a RENAME and is honoured: the agent is written
+        under the new id and the old file removed, 409 if that id is taken (the
+        built-in included), 400 if it is path-shaped. It is deliberately NOT
+        ignored — answering 200 to a rename that did not happen is the one
+        outcome that tells the client nothing. The agent's `memory_scope` is
+        carried through the edit, so a renamed agent keeps what it has learned.
+        """
         if _canonical(slug) is None:
             return JSONResponse(
                 {"error_tag": "BAD_REQUEST", "message": f"{slug[:64]!r} is not an agent id"},
@@ -453,6 +462,14 @@ def create_app(settings: Settings | None = None, orchestrator: Orchestrator | No
     # ------------------------------------------------------------------ runs
     @api.post("/runs")
     async def create_run(req: RunRequest) -> JSONResponse:
+        # The roster is a drop-in directory, so re-read it before resolving an
+        # agent. Without this, a file copied into agents/ was visible to
+        # GET /api/agents (which reloads) and invisible to the run that wanted to
+        # use it — the operator could see the agent in the list and be told it
+        # did not exist. A scan of a handful of small files is nothing next to
+        # the run it precedes.
+        if req.agent_id or (req.goal or "").lstrip().startswith("@"):
+            _reload_roster()
         try:
             run = orch.create(req.goal, req.max_rounds, req.criteria(), agent_id=req.agent_id)
         except RunLimit as exc:

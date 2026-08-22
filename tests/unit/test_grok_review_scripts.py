@@ -8,6 +8,7 @@ recording that names a provider it never spoke to, a wheel with no skills in it.
 
 from __future__ import annotations
 
+import json
 import pathlib
 import shutil
 import sys
@@ -211,3 +212,111 @@ def test_the_trees_the_build_hook_snapshots_exist_and_land_where_package_data_lo
         assert any(pathlib.PurePath(relative).match(pat) for pat in patterns), (
             f"{relative} is snapshotted into the package but no package-data glob matches it"
         )
+
+
+# ===================================================================== Q3-R2
+# The auditor could not see scripts/drill.py and so could not tell whether the
+# --agent value, the agent_id and the agent object were redacted. These are the
+# tests that answer it. Named for findability: Q3-R2 is about redaction, Q3-R3
+# about the structured agent.assigned check.
+
+
+def test_q3_r2_a_receipt_never_carries_a_key_shaped_agent_value(tmp_path, monkeypatch):
+    """Plant a key as --agent and prove it cannot reach the file.
+
+    Nobody sensibly passes a provider key to --agent, which is exactly why it is
+    worth testing: the receipt is a published artifact and the gate has to hold
+    for values nobody anticipated, not only for the ones named in an env var.
+    """
+    from omniagentos_starter.redact import clear_registered_secrets, register_secret
+
+    clear_registered_secrets()
+    planted = "xai-RECEIPTKEY-ABCDEFGHIJKLMNOP"
+    monkeypatch.setenv("XAI_API_KEY", planted)
+    register_secret(planted)
+
+    out = tmp_path / "receipt.json"
+    code = drill.main(
+        [
+            "--in-process",
+            "--agent", planted,
+            "--goal", "hello",
+            "--out", str(out),
+            "--data-dir", str(tmp_path / "var"),
+        ]
+    )
+    assert code != 0, "an agent that does not exist must never exit 0"
+    assert out.is_file(), "a refusal still writes a receipt — a missing file reads as 'never ran'"
+    written = out.read_text(encoding="utf-8")
+    assert planted not in written, "the planted key reached the receipt"
+    assert "RECEIPTKEY" not in written
+    receipt = json.loads(written)
+    assert receipt["ok"] is False
+    # It is redacted, not merely absent — the field is still there, so a reader
+    # can see that an agent WAS requested.
+    assert "[REDACTED]" in json.dumps(receipt["argv"]) or "[REDACTED]" in json.dumps(receipt)
+
+
+def test_q3_r2_the_agent_id_and_agent_object_go_through_redact(tmp_path, monkeypatch):
+    """The whole receipt is redacted on the way out, agent fields included."""
+    from omniagentos_starter.redact import clear_registered_secrets, register_secret
+
+    clear_registered_secrets()
+    planted = "xai-AGENTFIELD-ABCDEFGHIJKL"
+    monkeypatch.setenv("XAI_API_KEY", planted)
+    register_secret(planted)
+
+    out = tmp_path / "receipt.json"
+    receipt = {
+        "magic": drill.RECEIPT_MAGIC,
+        "argv": ["drill.py", "--agent", planted],
+        "agent_id": planted,
+        "agent": {"id": planted, "name": planted},
+        "status": "failed",
+    }
+    code = drill.finish(receipt, str(out), 1)
+    # finish() refuses outright if a secret survives; either way it must not land.
+    if code == 3:
+        assert not out.is_file() or planted not in out.read_text(encoding="utf-8")
+        return
+    written = out.read_text(encoding="utf-8")
+    assert planted not in written
+    assert "AGENTFIELD" not in written
+
+
+def test_q3_r2_a_persona_never_travels_in_a_receipt():
+    """An operator wrote the persona; a receipt is published. Only {id,name}."""
+    narrowed = drill._agent_summary(
+        {
+            "id": "riley",
+            "slug": "riley",
+            "name": "Riley",
+            "persona": "PERSONA SHOULD NOT TRAVEL",
+            "body": "BODY SHOULD NOT TRAVEL",
+            "tools": ["read_file"],
+        }
+    )
+    assert narrowed == {"id": "riley", "name": "Riley"}
+    assert "SHOULD NOT TRAVEL" not in json.dumps(narrowed)
+
+
+# ===================================================================== Q3-R3
+def test_q3_r3_the_assigned_check_is_structured_not_a_string_match():
+    """It reads agent_id off the event, both shapes, and canonicalises slugs."""
+    source = (REPO_ROOT / "scripts" / "drill.py").read_text(encoding="utf-8")
+    assert 'e.get("type") == "agent.assigned"' in source, "must select the event by type"
+    assert 'first.get("agent_id")' in source, "flattened shape"
+    assert '(first.get("payload") or {}).get("agent_id")' in source, "nested shape"
+    assert "safe_agent_slug(named) != wanted" in source, "compare canonical slugs, not raw strings"
+    assert drill.safe_agent_slug("Riley") == "riley"
+
+
+def test_q3_r3_a_run_that_ignored_the_agent_is_a_problem_not_a_pass(tmp_path):
+    """A verified run that silently fell through to the router must still fail."""
+    source = (REPO_ROOT / "scripts" / "drill.py").read_text(encoding="utf-8")
+    # the CHECKS block, not the request-building one earlier in the file
+    block = source.rsplit("if args.agent:", 1)[1].split("if not bool(summary.get(")[0]
+    assert "fell through to the router" in block
+    assert "problems.append" in block
+    # and the mismatch branch is separate from the missing branch
+    assert block.count("problems.append") >= 2

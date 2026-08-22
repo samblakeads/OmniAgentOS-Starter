@@ -22,7 +22,9 @@ Two things in here are security boundaries rather than conveniences:
 from __future__ import annotations
 
 import hashlib
+import os
 import re
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from xml.sax.saxutils import escape as xml_escape
@@ -224,6 +226,10 @@ class Agent:
             "version": self.version,
             "body": self.body,
             "builtin": self.builtin,
+            # The file's own name (never its directory — that is the operator's
+            # filesystem). Two entries can legitimately share a slug when a
+            # duplicate is on disk, and this is what tells them apart.
+            "file": Path(self.path).name if self.path else "",
             "enabled": self.enabled,
             "errors": list(self.errors),
             "sha256": self.sha256,
@@ -336,13 +342,23 @@ class AgentRoster:
         return len(self.agents)
 
     def by_id(self, slug: str) -> Agent | None:
+        """The agent that would run under this id.
+
+        With a duplicate slug on disk BOTH files are listed, so an enabled one is
+        preferred over a disabled twin — otherwise which agent you got would
+        depend on which filename sorted first.
+        """
         wanted = safe_agent_slug(slug)
-        for a in self.agents:
-            if a.slug == wanted:
+        matches = [a for a in self.agents if a.slug == wanted]
+        for a in matches:
+            if a.enabled:
                 return a
+        # The built-in is always runnable, so it outranks a DISABLED roster file
+        # that tried to take its id — otherwise a shadow file would knock the
+        # built-in out of the product just by existing and failing.
         if self.builtin and self.builtin.slug == wanted:
             return self.builtin
-        return None
+        return matches[0] if matches else None
 
     def usable(self, slug: str) -> Agent | None:
         """An agent that is present AND passed integrity. Disabled is not usable."""
@@ -408,7 +424,8 @@ def load_agents(root: Path | str | None, library=None) -> AgentRoster:
         p for p in root.rglob("*.md") if p.is_file() and p.name.lower() not in {"readme.md", "license.md"}
     )
     roster.files_on_disk = len(files)
-    seen: set[str] = set()
+    # slug -> the filename that claimed it first, so a loser can name its winner
+    seen: dict[str, str] = {}
     for path in files:
         try:
             if any(part.is_symlink() for part in _components(path, root)):
@@ -434,10 +451,35 @@ def load_agents(root: Path | str | None, library=None) -> AgentRoster:
             roster.builtin = agent
             roster.files_on_disk -= 1
             continue
-        if agent.slug in seen or agent.slug == BUILTIN_AGENT_SLUG:
-            roster.errors.append(f"{path.name}: duplicate slug {agent.slug}")
+        clash = seen.get(agent.slug) if agent.slug != BUILTIN_AGENT_SLUG else BUILTIN_AGENT_SLUG + ".md"
+        if clash and path.stem == agent.slug and clash != path.name and agent.slug != BUILTIN_AGENT_SLUG:
+            # `<slug>.md` is the name AgentStore writes, so it is the file the
+            # product manages. A drop-in that merely DECLARES the same slug must
+            # not displace it just because its filename sorted first — which is
+            # how `sales-closer-dup.md` was quietly winning over
+            # `sales-closer.md`. The canonical file takes the id; the newcomer
+            # becomes the disabled twin.
+            for other in roster.agents:
+                if other.slug == agent.slug and other.enabled:
+                    reason = f"duplicate slug of {path.name}"
+                    other.enabled = False
+                    other.errors.append(reason)
+                    roster.errors.append(f"{Path(other.path).name}: {reason}")
+            seen[agent.slug] = path.name
+            clash = ""
+        if clash:
+            # Listed, disabled, naming the file it lost to. Omitting it left the
+            # operator with a file on disk that the product simply did not have —
+            # and the winner was decided by filename sort order, so a file called
+            # `sales-closer-dup.md` silently displaced `sales-closer.md` and
+            # nothing anywhere said so.
+            reason = f"duplicate slug of {clash}"
+            agent.enabled = False
+            agent.errors.append(reason)
+            roster.errors.append(f"{path.name}: {reason}")
+            roster.agents.append(agent)
             continue
-        seen.add(agent.slug)
+        seen[agent.slug] = path.name
         missing = missing_skills(agent, library)
         if missing:
             agent.enabled = False
@@ -491,6 +533,29 @@ class AgentStore:
     def _ready(self) -> None:
         """Make the roster directory only when something is actually written."""
         self.root.mkdir(parents=True, exist_ok=True)
+
+    def _write_atomically(self, path: Path, text: str) -> None:
+        """Write the whole file or none of it.
+
+        `write_text` truncates first and then writes, so a crash, a full disk or
+        two writers landing together can leave a half-written agent on disk —
+        and a half-written agent is not a broken agent the loader reports, it is
+        a file with plausible front-matter and a missing body, which loads
+        cleanly and is silently wrong. Writing a temp file in the same directory
+        and renaming it over the target makes the swap atomic on POSIX and
+        Windows alike; a reader either sees the old file or the new one.
+        """
+        fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.stem}.", suffix=".tmp")
+        tmp = Path(tmp_name)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(text)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, path)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
 
     # ------------------------------------------------------------------ paths
     def path_for(self, slug: str, canonical_only: bool = False) -> Path:
@@ -571,7 +636,7 @@ class AgentStore:
         if path.exists():
             raise AgentError("AGENT_EXISTS", f"an agent named {agent.slug!r} already exists", status=409)
         agent.path = str(path)
-        path.write_text(agent.raw, encoding="utf-8")
+        self._write_atomically(path, agent.raw)
         return agent
 
     def update(self, slug: str, payload: dict, library=None) -> Agent:
@@ -581,6 +646,17 @@ class AgentStore:
         having no `name` — which made the obvious edit ("just change the title")
         the one thing the API would not do. The stored agent is the base and the
         payload is the delta.
+
+        A `slug` in the body is a RENAME, and it is honoured rather than ignored.
+        It used to be silently dropped: the request answered 200, the client
+        believed the rename happened, and the agent was still sitting under its
+        old id. Dropping a field a client sent is the worst of the three
+        options — worse than refusing it, because nothing tells anyone.
+
+        The rename writes the new file before removing the old one, so an
+        interrupted rename leaves the agent reachable under its old id rather
+        than nowhere. Its `memory_scope` travels with it in the merge below, so
+        a renamed agent keeps everything it has learned.
         """
         self._ready()
         path = self.path_for(slug)
@@ -601,10 +677,34 @@ class AgentStore:
             "body": current.body,
         }
         merged.update({k: v for k, v in payload.items() if v is not None})
-        agent = self.build(merged, slug=safe_agent_slug(slug))
+        # `slug` is a rename instruction, not a field of the merge.
+        requested = merged.pop("slug", None)
+        target_slug = safe_agent_slug(slug)
+        if requested is not None:
+            reject_path_shaped("slug", requested)
+            renamed = safe_agent_slug(requested)
+            if not renamed:
+                raise AgentError("BAD_REQUEST", "a slug must contain at least one letter or digit")
+            target_slug = renamed
+
+        agent = self.build(merged, slug=target_slug)
         self._require_known_skills(agent, library)
-        agent.path = str(path)
-        path.write_text(agent.raw, encoding="utf-8")
+
+        if target_slug == safe_agent_slug(slug):
+            agent.path = str(path)
+            self._write_atomically(path, agent.raw)
+            return agent
+
+        # A real rename: refuse every collision before touching the disk.
+        self._refuse_builtin_slug(target_slug)
+        destination = self.path_for(target_slug)
+        if destination.exists():
+            raise AgentError(
+                "AGENT_EXISTS", f"an agent named {target_slug!r} already exists", status=409
+            )
+        agent.path = str(destination)
+        self._write_atomically(destination, agent.raw)
+        path.unlink(missing_ok=True)
         return agent
 
     def duplicate(
@@ -645,7 +745,7 @@ class AgentStore:
         if path.exists():
             raise AgentError("AGENT_EXISTS", f"an agent named {clone.slug!r} already exists", status=409)
         clone.path = str(path)
-        path.write_text(clone.raw, encoding="utf-8")
+        self._write_atomically(path, clone.raw)
         return clone
 
     def delete(self, slug: str, roster: AgentRoster) -> str:

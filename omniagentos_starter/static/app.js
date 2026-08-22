@@ -25,7 +25,7 @@
     tasks: {}, cards: {}, dod: [], skills: {}, deliverable: "", files: [],
     calls: 0, tokens: 0, cost: 0, rounds: 0, health: null,
     inflight: false, streamErrors: 0, token: "", replay: false,
-    agents: [], editing: null, agentMode: "create"
+    agents: [], editing: null, agentMode: "create", agentsGeneration: 0
   };
 
   var MAX_STREAM_ERRORS = 5;
@@ -187,17 +187,28 @@
   }
 
   /* ------------------------------------------------------------- agents */
+  /* Roster fetches are not ordered. Saving an agent fires one while an earlier
+     one may still be in flight, and the browser gives no promise about which
+     lands first — so a slow response carrying the PRE-save list could arrive
+     last and repaint the roster without the agent that was just created. The
+     generation counter makes the answer "only the newest request may render";
+     an older reply is discarded rather than believed. */
   function loadAgents() {
+    var generation = (state.agentsGeneration += 1);
+    var current = function () { return generation === state.agentsGeneration; };
     return apiFetch("/api/agents").then(function (r) {
       if (!r.ok) { throw new Error("HTTP " + r.status); }
       return r.json();
     }).then(function (data) {
+      if (!current()) { return state.agents; }
       state.agents = data.agents || [];
       renderAgents();
       fillAgentPicker();
       updateAgentHint();
       return state.agents;
     }).catch(function () {
+      // A stale failure must not overwrite a fresh success either.
+      if (!current()) { return; }
       el("agents-list").innerHTML =
         '<p class="muted">✕ INTERNAL_ERROR — the agent roster could not be read.</p>';
     });
@@ -216,8 +227,12 @@
       var lessons = typeof a.lessons === "number" ? a.lessons : 0;
       // A disabled agent is SHOWN and says why. Hiding it would look exactly
       // like nobody ever created it.
+      // A disabled card names its FILE as well as its reason: two cards can
+      // legitimately share a slug when a duplicate is on disk, and without the
+      // filename the operator cannot tell which one to go and delete.
       var broken = a.enabled === false
-        ? '<div class="agent-meta">✕ disabled — ' + esc((a.errors || []).join("; ")) + "</div>"
+        ? '<div class="agent-meta">✕ disabled — ' + esc((a.errors || []).join("; ")) +
+          (a.file ? " (" + esc(a.file) + ")" : "") + "</div>"
         : "";
       // A built-in shows a DISABLED delete control that says why. Silently
       // omitting the button left the operator with no explanation on screen —
