@@ -262,6 +262,65 @@ async def test_a_run_without_a_manager_delegates_nothing(settings, tmp_path):
 
 # ------------------------------------------------------------- attribution
 @pytest.mark.asyncio
+async def test_member_pack_quality_checks_bind_only_to_that_members_task(settings, tmp_path):
+    """A manager's DoD must not merge every member's QUALITY CHECKS run-wide.
+
+    Each skill-sourced criterion is bound to the task (and member) that pack
+    was assigned to. The critic is shown that task's artifact alone for those
+    checks. Planner criteria stay run-wide. A copywriter's character-limit
+    check must not fail a research artifact it never produced.
+    """
+
+    def worker_text(call, _payload):
+        return f"UNIQUE-TASK-{call}-BODY"
+
+    script = Script(plan=TWO_TASK_PLAN, worker_text=worker_text)
+    orch = _orch(settings, script, tmp_path, [WRITER, RESEARCHER, DIRECTOR])
+    run = orch.create(GOAL, 1, [], agent_id="dara")
+    await orch.execute(run)
+
+    dod = _events(run, "planner.plan")[0]["dod"]
+    skill_dod = [c for c in dod if c["source"] not in ("planner", "operator")]
+    planner_dod = [c for c in dod if c["source"] == "planner"]
+    assert skill_dod, dod
+    assert planner_dod, dod
+    assert all(not c.get("task_id") for c in planner_dod), planner_dod
+
+    t1_sources = {c["source"] for c in skill_dod if c.get("task_id") == "t1"}
+    t2_sources = {c["source"] for c in skill_dod if c.get("task_id") == "t2"}
+    assert "niche-opportunity-scorer" in t1_sources, t1_sources
+    assert "ad-copy-framework-writer" in t2_sources, t2_sources
+    assert "ad-copy-framework-writer" not in t1_sources
+    assert "niche-opportunity-scorer" not in t2_sources
+    assert {c.get("member") for c in skill_dod if c.get("task_id") == "t1"} == {"vera"}
+    assert {c.get("member") for c in skill_dod if c.get("task_id") == "t2"} == {"nils"}
+
+    vera_prompt = script.prompt_text("worker", 0)
+    nils_prompt = script.prompt_text("worker", 1)
+    assert WRITER_PERSONA not in vera_prompt
+    assert RESEARCH_PERSONA not in nils_prompt
+    assert "platform character limit" not in vera_prompt
+    assert "Every niche has a score" not in nils_prompt
+    assert "Both parts are present" in vera_prompt
+    assert "Both parts are present" in nils_prompt
+
+    critic = script.prompt_text("critic", 0)
+    assert "GRADE ONLY task t1" in critic
+    assert "GRADE ONLY task t2" in critic
+    assert "GRADE the full deliverable" in critic
+    t1_block = critic.split('task_id="t1"', 1)[1].split("</criterion>", 1)[0]
+    t2_block = critic.split('task_id="t2"', 1)[1].split("</criterion>", 1)[0]
+    assert "UNIQUE-TASK-1-BODY" in t1_block
+    assert "UNIQUE-TASK-2-BODY" not in t1_block
+    assert "UNIQUE-TASK-2-BODY" in t2_block
+    assert "UNIQUE-TASK-1-BODY" not in t2_block
+
+    verifier = script.prompt_text("verifier", 0)
+    assert "GRADE ONLY task t1" in verifier
+    assert "GRADE ONLY task t2" in verifier
+
+
+@pytest.mark.asyncio
 async def test_lessons_are_credited_to_the_members_who_did_the_work(settings, tmp_path):
     script = Script(plan=TWO_TASK_PLAN)
     orch = _orch(settings, script, tmp_path, [WRITER, RESEARCHER, DIRECTOR])
@@ -439,12 +498,18 @@ def test_list_runs_can_be_filtered_by_agent_id(client):
     assert client.post("/api/agents", json=WRITER).status_code == 201
     assigned = client.post("/api/runs", json={"goal": GOAL, "agent_id": "nils"})
     assert assigned.status_code == 201, assigned.text
-    client.post("/api/runs", json={"goal": "a run with no agent"})
+    other = client.post("/api/runs", json={"goal": "a run with no agent"})
+    assert other.status_code == 201, other.text
+    everyone = client.get("/api/runs").json()["runs"]
+    assert len(everyone) >= 2
     scoped = client.get("/api/runs?agent_id=nils").json()
     rows = scoped["runs"]
     assert scoped["items"] == rows
     assert len(rows) == 1
     assert rows[0]["agent_id"] == "nils"
+    assert rows[0]["run_id"] == assigned.json()["run_id"]
+    assert all(r.get("agent_id") == "nils" for r in rows)
+    assert len(rows) < len(everyone)
 
 
 def test_a_run_is_refused_when_a_member_file_vanishes_before_start(client):

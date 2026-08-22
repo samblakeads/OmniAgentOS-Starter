@@ -154,20 +154,25 @@ def test_the_filter_names_the_agent_and_offers_a_way_out():
 def test_clicking_an_agent_scopes_runs_lessons_and_files_from_real_data():
     """OpenBot item 5: the card click is a real filter, not a banner.
 
-    Client-side over fetched /api/runs and /api/lessons (both carry agent_id)
-    is the contract; GET /api/runs?agent_id= is what the live oracle counts.
+    When scoped, app.js fetches GET /api/runs?agent_id=<slug> (the live
+    oracle counts that list) and re-renders runs / lessons / files from it.
     """
-    assert 'apiFetch("/api/lessons")' in APP_JS
-    assert "/api/runs?agent_id=" in APP_JS or 'apiFetch("/api/runs")' in APP_JS
-    scope = APP_JS.split("function filterByAgent(")[1].split("function showWorkerAgent")[0]
-    assert "renderFiles" in scope or "renderScoped" in APP_JS
-    assert "agent_id" in scope
-    # the banner's first number is the run count (the live oracle reads it)
+    assert 'apiFetch("/api/lessons")' in APP_JS or "/api/lessons?agent_id=" in APP_JS
+    assert "/api/runs?agent_id=" in APP_JS
+    urls = APP_JS.split("function historyUrls()")[1].split("function filterByAgent(")[0]
+    assert "/api/runs?agent_id=" in urls
+    assert "state.agentFilter" in urls
+    scope = APP_JS.split("function filterByAgent(")[1].split("function matchingRuns")[0]
+    assert "loadHistory" in scope
+    load = APP_JS.split("function loadHistory()")[1].split("function matchingRuns")[0]
+    assert "historyUrls" in load
+    assert "renderScopedPanels" in load
+    # the banner's first interpolated number is the run count (the live
+    # oracle takes the first digit; agent names like "D18" must come after)
     banner = APP_JS.split("function renderAgentFilter()")[1].split("function showWorkerAgent")[0]
-    assert "runs" in banner
+    assert banner.find("runs +") < banner.find("esc(name)")
     assert "Show everyone" in banner
     assert 'data-testid="agent-runs-filter"' in INDEX
-    # files and memory actually consult the filter
     files = APP_JS.split("function renderFiles()")[1].split("function renderReceipt")[0]
     assert "agentFilter" in files or "agent_id" in files
     assert "function renderLessonHistory" in APP_JS

@@ -334,8 +334,11 @@ def create_app(settings: Settings | None = None, orchestrator: Orchestrator | No
         return JSONResponse(redact(body))
 
     @api.get("/lessons")
-    async def list_lessons() -> JSONResponse:
+    async def list_lessons(agent_id: str | None = None) -> JSONResponse:
         lessons = orch.memory.all_lessons()
+        if agent_id:
+            wanted = safe_agent_slug(agent_id)
+            lessons = [row for row in lessons if safe_agent_slug(row.get("agent_id") or "") == wanted]
         return JSONResponse(redact({"lessons": lessons, "items": lessons}))
 
     # ---------------------------------------------------------------- agents

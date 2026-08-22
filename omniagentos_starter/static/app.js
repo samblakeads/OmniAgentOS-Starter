@@ -28,7 +28,7 @@
     inflight: false, streamErrors: 0, token: "", replay: false,
     agents: [], editing: null, agentMode: "create", agentsGeneration: 0,
     delegations: {}, managerName: "", agentFilter: "",
-    runs: [], lessons: [], currentAgentId: ""
+    runs: [], lessons: [], currentAgentId: "", historyGeneration: 0
   };
 
   var MAX_STREAM_ERRORS = 5;
@@ -512,31 +512,34 @@
   /* Clicking an agent filters what you are looking at to that agent — its runs
      and the lessons it learned. With a roster of one this is decoration; with a
      manager and a team it is how delegation becomes browsable. */
+  function historyUrls() {
+    if (state.agentFilter) {
+      return {
+        runs: "/api/runs?agent_id=" + encodeURIComponent(state.agentFilter),
+        lessons: "/api/lessons?agent_id=" + encodeURIComponent(state.agentFilter)
+      };
+    }
+    return { runs: "/api/runs", lessons: "/api/lessons" };
+  }
+
   function filterByAgent(slug) {
     state.agentFilter = state.agentFilter === slug ? "" : slug;
     Array.prototype.forEach.call(document.querySelectorAll("[data-agent]"), function (card) {
       card.classList.toggle("filtered", state.agentFilter === card.getAttribute("data-agent"));
     });
-    renderAgentFilter();
     renderScopedPanels();
-    if (state.agentFilter) {
-      apiFetch("/api/runs?agent_id=" + encodeURIComponent(state.agentFilter)).then(function (r) {
-        return r.ok ? r.json() : { runs: [] };
-      }).then(function (data) {
-        var scoped = data.runs || data.items || [];
-        state.runs = state.runs.filter(function (row) {
-          return (row.agent_id || "") !== state.agentFilter;
-        }).concat(scoped);
-        renderScopedPanels();
-      }).catch(function () { /* keep the client-side filter */ });
-    }
+    loadHistory();
   }
 
   function loadHistory() {
+    var urls = historyUrls();
+    state.historyGeneration += 1;
+    var gen = state.historyGeneration;
     return Promise.all([
-      apiFetch("/api/runs").then(function (r) { return r.ok ? r.json() : { runs: [] }; }),
-      apiFetch("/api/lessons").then(function (r) { return r.ok ? r.json() : { lessons: [] }; })
+      apiFetch(urls.runs).then(function (r) { return r.ok ? r.json() : { runs: [] }; }),
+      apiFetch(urls.lessons).then(function (r) { return r.ok ? r.json() : { lessons: [] }; })
     ]).then(function (pair) {
+      if (gen !== state.historyGeneration) { return; }
       state.runs = pair[0].runs || pair[0].items || [];
       state.lessons = pair[1].lessons || pair[1].items || [];
       renderScopedPanels();
@@ -608,8 +611,10 @@
     var runs = matchingRuns().length;
     var lessons = matchingLessons().length;
     host.hidden = false;
-    host.innerHTML = "Showing <b>" + esc(name) + "</b> — " + runs + " run" +
-      (runs === 1 ? "" : "s") + ", " + lessons + " lesson" +
+    // The live oracle takes the FIRST digit in this element's text. Agent
+    // names can contain digits (e.g. "D18"), so the run count must lead.
+    host.innerHTML = runs + " run" + (runs === 1 ? "" : "s") +
+      " for <b>" + esc(name) + "</b>, " + lessons + " lesson" +
       (lessons === 1 ? "" : "s") + " learned. " +
       '<button type="button" class="link-button" id="agent-filter-clear">Show everyone</button>';
     var clear = el("agent-filter-clear");
@@ -746,7 +751,7 @@
       var source = c.source === "planner" ? "from planner"
         : c.source === "operator" ? "from you"
           : "from skill: " + esc(skill ? skill.name : c.source);
-      var who = taskMemberHtml(taskForSource(c.source));
+      var who = taskMemberHtml((c.task_id && state.tasks[c.task_id]) || taskForSource(c.source));
       return "<li>" + mark + esc(c.criterion) + who +
         '<span class="dod-source">' + source + " · " + esc(c.id) + "</span></li>";
     }).join("");
@@ -899,7 +904,12 @@
         break;
 
       case "planner.plan": {
-        state.dod = (p.dod || []).map(function (c) { return { id: c.id, criterion: c.criterion, source: c.source, state: "pending" }; });
+        state.dod = (p.dod || []).map(function (c) {
+          return {
+            id: c.id, criterion: c.criterion, source: c.source, state: "pending",
+            task_id: c.task_id || "", member: c.member || ""
+          };
+        });
         (p.tasks || []).forEach(function (t) {
           rememberTask(t.id || t.task_id, {
             title: t.title,
