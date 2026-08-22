@@ -319,6 +319,45 @@ def post_json(base_url: str, path: str, body: dict[str, Any], **kwargs: Any) -> 
     )
 
 
+def check_sse_headers(base_url: str, run_id: str, read_timeout_s: float = 15.0) -> dict[str, str]:
+    """Verify the SSE response line/headers WITHOUT buffering the full body.
+
+    BINDING: a plain `httpx.get(.../events)` buffers the entire streamed
+    response before returning, so on a real (tens-of-seconds) run it either
+    times out well before completion or forces an unreasonably long request
+    timeout. This opens the connection with `httpx.stream`, reads only the
+    first chunk (enough to prove the server is actually streaming, not
+    buffering server-side either), asserts status/Content-Type/Cache-Control/
+    X-Accel-Buffering, then closes the connection immediately — the caller
+    never waits for run completion just to check headers.
+    """
+    url = f"{base_url}/api/runs/{run_id}/events"
+    headers = {"Accept": "text/event-stream", "Cache-Control": "no-cache"}
+    with httpx.stream("GET", url, headers=headers, timeout=read_timeout_s) as resp:
+        if resp.status_code != 200:
+            body = resp.read().decode("utf-8", "replace")
+            raise AssertionError(f"SSE GET {url} -> HTTP {resp.status_code}: {body[:500]}")
+        ctype = resp.headers.get("content-type", "")
+        if "text/event-stream" not in ctype.lower():
+            raise AssertionError(f"SSE Content-Type must be text/event-stream, got {ctype!r}")
+        cc = resp.headers.get("cache-control", "")
+        if "no-cache" not in cc.lower():
+            raise AssertionError(f"SSE Cache-Control must include no-cache, got {cc!r}")
+        xab = resp.headers.get("x-accel-buffering", "")
+        if xab.lower() != "no":
+            raise AssertionError(f"SSE X-Accel-Buffering must be 'no', got {xab!r}")
+        # Prove bytes are actually flowing (not server-buffered) without
+        # waiting for the stream to finish.
+        got_bytes = False
+        for chunk in resp.iter_bytes():
+            if chunk:
+                got_bytes = True
+            break
+        if not got_bytes:
+            raise AssertionError("SSE stream produced no bytes before closing")
+        return dict(resp.headers)
+
+
 def event_type(rec: dict[str, Any]) -> str:
     ev = rec.get("event") or ""
     data = rec.get("data")

@@ -60,16 +60,36 @@ def test_d10_workspace_escape_through_engine_tool_path():
         assert result.get("ok") is not True
 
     # Guard construction refuses repo-root / package-dir / data-dir.
+    # BINDING: constructing with an UNSET data_dir must not itself raise
+    # (that would trip the exception assertion before the forbidden-roots
+    # logic ever runs, so the test would still pass if that logic were
+    # deleted). data_dir is always passed explicitly, distinct from the
+    # root under test, so a positive raise here can only come from the
+    # forbidden-roots check. The constructor's root kwarg may be named
+    # `root` or `base` — detected via inspect so this test binds to
+    # whichever the implementer used rather than guessing.
+    import inspect
+
     from omniagentos_starter.tools import WorkspaceGuard  # type: ignore
 
     data_dir = Path(tempfile.mkdtemp(prefix="omniagentos-data-"))
+    sig = inspect.signature(WorkspaceGuard.__init__)
+    params = set(sig.parameters) - {"self"}
+    root_kw = "root" if "root" in params else ("base" if "base" in params else None)
+    assert root_kw, (
+        f"WorkspaceGuard.__init__ must accept root= or base=, got params={params!r}"
+    )
+
     for bad in (REPO_ROOT, REPO_ROOT / "omniagentos_starter", data_dir):
+        kwargs = {root_kw: bad}
+        if "data_dir" in params:
+            kwargs["data_dir"] = data_dir
         raised = False
         try:
-            WorkspaceGuard(bad)
+            WorkspaceGuard(**kwargs)
         except Exception:
             raised = True
-        assert raised, f"WorkspaceGuard({bad}) must be refused at construction"
+        assert raised, f"WorkspaceGuard(**{kwargs}) must be refused at construction"
 
     hits = scan_package_for_shell()
     assert hits == [], "package contains subprocess/os.system/Popen/eval(/exec(:\n" + "\n".join(hits)

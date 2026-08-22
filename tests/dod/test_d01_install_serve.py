@@ -8,6 +8,7 @@ import uuid
 from _harness import (
     REPO_ROOT,
     assert_no_key_leak,
+    check_sse_headers,
     event_type,
     get_json,
     require_live,
@@ -72,11 +73,13 @@ def test_d01_serve_port0_pid_nonce_probe():
 
         if key:
             rid = start_run(srv.base_url, "Respond with the single word pong.")
-            ev = get_json(srv.base_url, f"/api/runs/{rid}/events")
-            assert ev.status_code == 200
-            assert "no-cache" in ev.headers.get("cache-control", "").lower()
-            assert ev.headers.get("x-accel-buffering", "").lower() == "no"
-            # drain a bit so the child is not wedged
+            # STREAMED header check only — a plain buffering GET on this
+            # endpoint waits for the whole run body and previously made D1
+            # flaky (httpx.ReadTimeout) on any run slower than the default
+            # 15s timeout. This opens the stream, asserts headers on the
+            # first chunk, and closes without waiting for run completion.
+            check_sse_headers(srv.base_url, rid)
+            # drain (separately, generous timeout) so the child is not wedged
             from _harness import collect_sse
 
             recs = collect_sse(srv.base_url, rid, timeout_s=90.0)
