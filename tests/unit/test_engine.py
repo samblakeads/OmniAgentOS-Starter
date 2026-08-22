@@ -396,10 +396,17 @@ async def test_a_declined_candidate_skill_leaves_no_criteria_behind(settings, tm
     assert "vsl-script" in selected, "both packs are candidates for this goal"
     sources = {c["source"] for c in payload_of(run, "planner.plan")["dod"]}
     assert "ad-copy" in sources
-    assert "vsl-script" not in sources
-    declined = payload_of(run, "skill.declined")["skill_ids"]
-    assert "vsl-script" in declined
-    assert "general-assistant" in declined, "the generalist is always on the bench, and is declined here"
+    assert "vsl-script" not in sources, (
+        "a pack no task was given must not leave its QUALITY CHECKS behind as binding criteria"
+    )
+    assert "general-assistant" not in sources
+    # The routed top pack WAS assigned, so the router has nothing to correct.
+    assert not [e for e in run.bus.events if e["type"] == "skill.assigned_by_router"]
+    # And an ordinary unused runner-up is not a "decline". Reporting the whole
+    # bench as declined on every run — the generalist included — made a correctly
+    # routed run look like a routing failure in the event log.
+    declined = [e["payload"]["skill_id"] for e in run.bus.events if e["type"] == "skill.declined"]
+    assert declined == [], declined
     assert run.status == "done"
 
 

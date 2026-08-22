@@ -62,7 +62,7 @@ FILE_BLOCK_RE = re.compile(
 PLANNER_SCHEMA = (
     '{"dod":[{"id":"d1","criterion":"one checkable requirement"}],'
     '"tasks":[{"id":"t1","title":"short title","skill_id":"<one of the skill ids given>",'
-    '"instruction":"what this worker must produce","depends_on":["t0"],"writes_files":false}]}'
+    '"instruction":"what this worker must produce","depends_on":["t0"],"writes_files":false,"skill_reason":"only if you fell back to general-assistant: one sentence on why"}]}'
 )
 VERDICT_SCHEMA = (
     '{"verdicts":[{"criterion_id":"<exactly one of the ids listed>","task_id":"<the task responsible>",'
@@ -338,6 +338,9 @@ class Engine:
         self.lessons: list = []
         self.lesson_block = ""
         self._last_tool_error: dict | None = None
+        self.selection_fallback = True
+        self.selection_scores: dict[str, float] = {}
+        self.skill_reasons: dict[str, str] = {}
 
     # ------------------------------------------------------------ transcript
     def _write_transcript(self, entry: dict) -> None:
@@ -373,6 +376,41 @@ class Engine:
 
     def _goal_block(self) -> str:
         return f"<goal>{_esc(self.run.goal)}</goal>"
+
+    def _routing_block(self) -> str:
+        """What the router already decided, stated as a decision rather than a menu.
+
+        The old prompt offered every pack — including the generalist — as an
+        equal "candidate" and then warned hard about binding QUALITY CHECKS. A
+        careful model reads that as "the safe choice is the generalist", and that
+        is exactly what it kept choosing: the router scored a domain pack at 29
+        and every task still went to general-assistant. Routing is not the
+        planner's job; the planner's job is to use the routing.
+        """
+        general = builtin_pack().slug
+        if self.selection_fallback or not self.selected:
+            return (
+                "ROUTED SKILLS: none. No pack in the library matched this goal, so assign "
+                f"`{general}` to every task."
+            )
+        lines = "\n".join(
+            f"- {_esc(p.slug)} (score {self.selection_scores.get(p.slug, 0)}, category {_esc(p.category)}): "
+            f"{_esc(p.summary or p.name)}"
+            for p in self.selected
+        )
+        top = self.selected[0].slug
+        return (
+            "ROUTED SKILLS — a deterministic keyword router already matched these packs to this "
+            "goal and scored them. You are not being asked to re-do that match:\n"
+            + lines
+            + f"\n\nAssign `skill_id` on every task from that list, and give at least one task "
+            f"`{_esc(top)}` (the highest-scoring match). The specialist pack is what makes this "
+            "deliverable better than a generic answer.\n"
+            f"The ONE exception: if the goal is clearly outside every routed pack, you may assign "
+            f"`{general}` instead — and then that task MUST carry a `skill_reason` field with one "
+            "sentence saying why the routed pack does not fit. A silent switch to the generalist is "
+            "not an answer, it is an omission."
+        )
 
     # ------------------------------------------------------------------- run
     async def execute(self) -> RunState:
@@ -434,6 +472,12 @@ class Engine:
     async def _select_skills(self) -> None:
         packs, scores, fallback = self.library.select(self.run.goal, k=2)
         self.selected = packs
+        # Keep the router's confidence, not just its answer. `fallback` means
+        # nothing cleared the match floor, which is the ONLY case where the
+        # generalist is the honest choice — everywhere else the routed pack has
+        # measurable evidence behind it and must reach a Worker.
+        self.selection_fallback = fallback
+        self.selection_scores = {row["skill_id"]: row["score"] for row in scores}
         # The generalist is always on the bench. Without it the planner must assign a
         # specialised pack even when none fits, and that pack's QUALITY CHECKS become
         # criteria the goal can never satisfy.
@@ -481,10 +525,11 @@ class Engine:
                 [
                     self.lesson_block,
                     self._goal_block(),
-                    "CANDIDATE SKILLS (assign each task exactly one skill_id from this list):\n"
-                    + self._skill_blocks(),
+                    self._routing_block(),
+                    "SKILL PACKS (the full text of each one you may assign):\n" + self._skill_blocks(),
                     "The QUALITY CHECKS of the skills you actually assign become binding criteria in the "
-                    "Definition of Done, so only assign a skill whose checks this goal can genuinely satisfy:\n"
+                    "Definition of Done. That is the point — they are the standard this deliverable will be "
+                    "held to. Check they are satisfiable before you assign, and say so if they are not:\n"
                     + (self._dod_block(candidates) or "- (none)"),
                     (
                         "Produce the SMALLEST set of tasks that fully satisfies the goal — very often exactly one. "
@@ -538,6 +583,9 @@ class Engine:
         for i, raw in enumerate(raw_tasks, start=1):
             tid = str(raw.get("id") or f"t{i}").strip()[:24] or f"t{i}"
             skill_id = str(raw.get("skill_id") or "").strip()
+            reason = str(raw.get("skill_reason") or "").strip()[:300]
+            if reason:
+                self.skill_reasons[tid] = reason
             self.tasks[tid] = Task(
                 id=tid,
                 title=str(raw.get("title") or f"Task {i}")[:120],
@@ -553,12 +601,13 @@ class Engine:
                 skill_id=default_skill,
                 instruction=self.run.goal,
             )
+        self._enforce_routing()
         # Seed the DoD from the skills the plan ACTUALLY uses. A candidate skill the
         # planner declined must not leave its standards behind as criteria the
         # deliverable can never satisfy — that is a run doomed before it starts.
         used = {t.skill_id for t in self.tasks.values()}
         seeded = self._seed_from([p for p in self.assignable if p.slug in used])
-        declined = sorted({p.slug for p in self.assignable} - used)
+        declined = self._declined(used)
 
         dod = operator + seeded + added
         if len(dod) > MAX_DOD_CRITERIA:
@@ -570,8 +619,8 @@ class Engine:
         self.dod = dod
         if not self.dod:
             self.dod = [Criterion(id="p1", criterion="The deliverable fully answers the goal.", source="planner")]
-        if declined:
-            self.bus.emit("skill.declined", {"skill_ids": declined, "reason": "no task was assigned this skill"})
+        for slug, reason in declined:
+            self.bus.emit("skill.declined", {"skill_ids": [slug], "skill_id": slug, "reason": reason})
         self.order = self._topo_order()
         if pruned:
             self.bus.emit("plan.pruned", {**pruned, "caps": {"tasks": MAX_PLAN_TASKS, "dod": MAX_DOD_CRITERIA}})
@@ -586,11 +635,92 @@ class Engine:
                         "skill_id": t.skill_id,
                         "depends_on": t.depends_on,
                         "writes_files": t.writes_files,
+                        "skill_reason": self.skill_reasons.get(t.id, ""),
                     }
                     for t in (self.tasks[i] for i in self.order)
                 ],
             },
         )
+
+    def _primary_task(self) -> Task:
+        """The task that produces the deliverable: no dependencies, else the first."""
+        for task in self.tasks.values():
+            if not task.depends_on:
+                return task
+        return next(iter(self.tasks.values()))
+
+    def _enforce_routing(self) -> None:
+        """The routed pack must actually reach a Worker.
+
+        Observed live: the router scored `refund-request-handler` at 29.1 and the
+        Planner assigned every task to `general-assistant` anyway, so the run
+        emitted `skill.declined` and the quality gate read "from skill:
+        general-assistant". The selection was correct and had no effect — which
+        is indistinguishable, on stage and in the event log, from having no skill
+        library at all.
+
+        So the prompt asks, and this enforces: when a pack cleared the match
+        floor and no task carries it, the highest-scoring one is assigned to the
+        primary task and the override is announced. This is deliberately NOT a
+        silent correction — `skill.assigned_by_router` says the router, not the
+        planner, made this call, and carries the planner's own reason if it gave
+        one.
+        """
+        if self.selection_fallback or not self.selected:
+            return  # the router has no opinion; it must not manufacture one
+        top = self.selected[0]
+        if any(t.skill_id == top.slug for t in self.tasks.values()):
+            return
+        task = self._primary_task()
+        if self.skill_reasons.get(task.id):
+            # The prompt grants exactly one way out: say why. A planner that
+            # states its objection is exercising that, and forcing the pack on
+            # anyway would put QUALITY CHECKS the planner just told us are
+            # unsatisfiable into the DoD — a run doomed before it starts. The
+            # reason is recorded and announced as a decline, so the opt-out is
+            # visible rather than silent, which was the whole complaint.
+            return
+        replaced = task.skill_id
+        task.skill_id = top.slug
+        self.bus.emit(
+            "skill.assigned_by_router",
+            {
+                "task_id": task.id,
+                "skill_id": top.slug,
+                "skill_ids": [top.slug],
+                "score": self.selection_scores.get(top.slug, 0),
+                "replaced": replaced,
+                "planner_reason": self.skill_reasons.get(task.id, ""),
+                "reason": (
+                    f"the router matched {top.slug} to this goal (score "
+                    f"{self.selection_scores.get(top.slug, 0)}) and the plan assigned it to no task"
+                ),
+            },
+        )
+
+    def _declined(self, used: set[str]) -> list[tuple[str, str]]:
+        """Packs that genuinely went unused, each with the real reason.
+
+        Not every unassigned pack is a decline. The generalist sitting unused on
+        the bench is the system working; a runner-up the planner passed over is
+        an ordinary choice. A decline is worth an event only when the planner
+        rejected a routed pack in words, or when the pack never cleared the match
+        floor in the first place — anything else was noise that made a working
+        run look like a failed routing.
+        """
+        out: list[tuple[str, str]] = []
+        rejected = {r for r in self.skill_reasons.values() if r}
+        for pack in self.assignable:
+            if pack.slug in used or pack.slug == builtin_pack().slug:
+                continue
+            if pack.slug not in self.selection_scores:
+                continue
+            score = self.selection_scores.get(pack.slug, 0)
+            if self.selection_fallback or not score:
+                out.append((pack.slug, f"score {score} did not clear the match floor"))
+            elif rejected:
+                out.append((pack.slug, "the planner rejected it: " + "; ".join(sorted(rejected))[:200]))
+        return out
 
     def _topo_order(self) -> list[str]:
         order: list[str] = []
