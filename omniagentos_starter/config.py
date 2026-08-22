@@ -57,6 +57,12 @@ ERROR_TAGS = (
     # inside the data dir) — distinct from "there is no such run".
     "WORKSPACE_REFUSED",
     "RUN_NOT_FOUND",
+    # An agent asked for a tool its own definition does not carry. Distinct from
+    # an escape: the path was fine, the CAPABILITY was not granted.
+    "TOOL_NOT_PERMITTED",
+    "AGENT_NOT_FOUND",
+    "AGENT_EXISTS",
+    "AGENT_BUILTIN",
     "REPLAY_FAILED",
     "REPLAY_TRUNCATED",
     "APP_AUTH",

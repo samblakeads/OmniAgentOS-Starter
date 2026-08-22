@@ -242,6 +242,24 @@ def test_every_field_an_agent_contributes_is_escaped():
     assert "&lt;t&gt;" in block and "&lt;p&gt;" in block and "&lt;b&gt;" in block
 
 
+def test_ordinary_punctuation_survives_into_the_prompt_verbatim():
+    """Escaping is for structure. A persona full of &apos; is a mangled persona.
+
+    The oracle proves an agent was used by finding its persona text in the
+    prompt transcript, so `Riley's` has to come out as `Riley's`.
+    """
+    agent = Agent(
+        slug="riley",
+        name="Riley",
+        persona="Calm and exact. Never says \"sorry\" twice, and cites the customer's own words.",
+        body="Lead with the customer's sentence, then the policy's clause.",
+    )
+    block = agent.prompt_block()
+    assert agent.persona in block
+    assert agent.body in block
+    assert "&apos;" not in block and "&quot;" not in block.split("agent-sha256:")[1]
+
+
 # ------------------------------------------------------------------ the store
 def test_create_read_update_duplicate_delete(tmp_path):
     root = tmp_path / "agents"

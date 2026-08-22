@@ -65,8 +65,22 @@ _ESC_ENTITIES = {'"': "&quot;", "'": "&apos;"}
 _SLUG_RE = re.compile(r"[^a-z0-9-]+")
 
 
-def _esc(text) -> str:
+def _esc_attr(text) -> str:
+    """For a value inside quotes: quotes must not be able to close the attribute."""
     return xml_escape(str(text if text is not None else ""), _ESC_ENTITIES)
+
+
+def _esc(text) -> str:
+    """For element text: escape structure, leave punctuation alone.
+
+    `<`, `>` and `&` are what let text become structure, and they are escaped.
+    Quotes and apostrophes are not — in element content they are ordinary
+    characters, and mangling them would mean an operator's persona reads back
+    with `&apos;` scattered through it and no longer appears verbatim in the
+    prompt transcript, which is the thing the oracle reads to prove the agent
+    was actually used.
+    """
+    return xml_escape(str(text if text is not None else ""))
 
 
 class AgentError(Exception):
@@ -184,7 +198,7 @@ class Agent:
         """
         skills = ", ".join(_esc(s) for s in self.skills) or "(router's choice)"
         return (
-            f'<agent id="{_esc(self.slug)}" name="{_esc(self.name)}" '
+            f'<agent id="{_esc_attr(self.slug)}" name="{_esc_attr(self.name)}" '
             f"agent-sha256:{self.sha256}>\n"
             f"{AGENT_PROHIBITION}\n"
             f"YOU ARE: {_esc(self.name)}"

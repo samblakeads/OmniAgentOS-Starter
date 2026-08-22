@@ -340,12 +340,20 @@ class SkillLibrary:
         idf = self._idf()
         return (max(idf.values()) if idf else 1.0) * self.DECLARED_BOOST
 
-    def score(self, goal: str) -> list[tuple[SkillPack, float]]:
-        """Deterministic IDF-weighted overlap, zero for packs without real evidence."""
+    def score(self, goal: str, allowed: set[str] | None = None) -> list[tuple[SkillPack, float]]:
+        """Deterministic IDF-weighted overlap, zero for packs without real evidence.
+
+        `allowed` restricts scoring to one agent's own equipment. The scores
+        themselves are still computed against the whole library's IDF, so a pack
+        does not become a better match merely because the agent carries few of
+        them — the bar is the same bar, applied to a shorter shelf.
+        """
         goal_set = set(tokenize(goal))
         idf = self._idf()
         scored: list[tuple[SkillPack, float]] = []
         for pack in self.packs:
+            if allowed is not None and pack.slug not in allowed:
+                continue
             declared = set(pack.keywords)
             matched = set(pack.body_keywords) & goal_set
             # A whole-word category match, so "copy" does not match "copyright".
@@ -365,7 +373,9 @@ class SkillLibrary:
         scored.sort(key=lambda sp: (-sp[1], sp[0].slug))
         return scored
 
-    def select(self, goal: str, k: int = 2) -> tuple[list[SkillPack], list[dict], bool]:
+    def select(
+        self, goal: str, k: int = 2, allowed: set[str] | None = None
+    ) -> tuple[list[SkillPack], list[dict], bool]:
         """Deterministic keyword selection. Returns (packs, scores, fallback_used).
 
         A single incidental token in common is not a match: a pack must score at
@@ -374,7 +384,7 @@ class SkillLibrary:
         orchestration, and its "exactly one CTA per email body" check then became
         a criterion the deliverable could never satisfy.
         """
-        scored = self.score(goal)
+        scored = self.score(goal, allowed=allowed)
         bar = self.MATCH_UNITS * self.decisive_word_weight()
         hits = [(p, s) for p, s in scored if s >= bar]
         if hits:

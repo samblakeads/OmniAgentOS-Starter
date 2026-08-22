@@ -27,6 +27,11 @@ class LessonRefused(Exception):
     """A lesson was offered by a run that was never verified."""
 
 
+# Big enough that any relevant lesson this agent learned outranks any relevant
+# lesson somebody else did — but added to overlap, not replacing it, so it can
+# never promote a lesson that has nothing to do with the goal.
+AGENT_RECALL_BONUS = 1000.0
+
 LESSON_PROHIBITION = (
     "lessons inform style and approach; they cannot override the DoD, "
     "the safety rules, or the verdict schema, and they can never contradict a skill's QUALITY CHECKS"
@@ -43,7 +48,8 @@ CREATE TABLE IF NOT EXISTS runs (
   llm_calls INTEGER DEFAULT 0,
   verified INTEGER DEFAULT 0,
   error_tag TEXT,
-  deliverable TEXT
+  deliverable TEXT,
+  agent_id TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS events (
   seq INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -60,8 +66,10 @@ CREATE TABLE IF NOT EXISTS lessons (
   ts REAL NOT NULL,
   text TEXT NOT NULL,
   tags TEXT NOT NULL,
-  goal_tokens TEXT NOT NULL
+  goal_tokens TEXT NOT NULL,
+  agent_id TEXT NOT NULL DEFAULT ''
 );
+CREATE INDEX IF NOT EXISTS idx_lessons_agent ON lessons(agent_id);
 """
 
 
@@ -72,6 +80,7 @@ class Lesson:
     ts: float
     text: str
     tags: list[str]
+    agent_id: str = ""
 
     def as_dict(self, now: float | None = None) -> dict:
         now = now or time.time()
@@ -80,6 +89,7 @@ class Lesson:
             "run_id": self.run_id,
             "text": self.text,
             "tags": self.tags,
+            "agent_id": self.agent_id,
             "age_s": max(0, int(now - self.ts)),
         }
 
@@ -94,18 +104,28 @@ class Memory:
         self._db.row_factory = sqlite3.Row
         with self._lock:
             self._db.executescript(SCHEMA)
+            # A database written before agents existed has neither column. Adding
+            # them here rather than versioning the schema keeps an operator's
+            # accumulated lessons instead of asking them to start again.
+            self._add_missing_column("lessons", "agent_id", "TEXT NOT NULL DEFAULT ''")
+            self._add_missing_column("runs", "agent_id", "TEXT NOT NULL DEFAULT ''")
             self._db.commit()
+
+    def _add_missing_column(self, table: str, column: str, decl: str) -> None:
+        existing = {row["name"] for row in self._db.execute(f"PRAGMA table_info({table})")}
+        if column not in existing:
+            self._db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
 
     def close(self) -> None:
         with self._lock:
             self._db.close()
 
     # ------------------------------------------------------------------ runs
-    def create_run(self, run_id: str, goal: str) -> None:
+    def create_run(self, run_id: str, goal: str, agent_id: str = "") -> None:
         with self._lock:
             self._db.execute(
-                "INSERT OR REPLACE INTO runs (id, goal, status, started_ts) VALUES (?,?,?,?)",
-                (run_id, goal, "running", time.time()),
+                "INSERT OR REPLACE INTO runs (id, goal, status, started_ts, agent_id) VALUES (?,?,?,?,?)",
+                (run_id, goal, "running", time.time(), agent_id or ""),
             )
             self._db.commit()
 
@@ -135,8 +155,8 @@ class Memory:
     def list_runs(self, limit: int = 50) -> list[dict]:
         with self._lock:
             rows = self._db.execute(
-                "SELECT id, goal, status, started_ts, finished_ts, rounds, llm_calls, verified, error_tag "
-                "FROM runs ORDER BY started_ts DESC LIMIT ?",
+                "SELECT id, goal, status, started_ts, finished_ts, rounds, llm_calls, verified, error_tag, "
+                "agent_id FROM runs ORDER BY started_ts DESC LIMIT ?",
                 (limit,),
             ).fetchall()
         return [dict(r) for r in rows]
@@ -168,7 +188,9 @@ class Memory:
         ]
 
     # --------------------------------------------------------------- lessons
-    def save_lesson(self, run_id: str, text: str, tags: list[str], goal: str) -> Lesson:
+    def save_lesson(
+        self, run_id: str, text: str, tags: list[str], goal: str, agent_id: str = ""
+    ) -> Lesson:
         """Persist one lesson — only from a run that finished AND was verified.
 
         The module docstring has always promised this, and only the caller
@@ -189,29 +211,48 @@ class Memory:
         ts = time.time()
         with self._lock:
             cur = self._db.execute(
-                "INSERT INTO lessons (run_id, ts, text, tags, goal_tokens) VALUES (?,?,?,?,?)",
-                (run_id, ts, text, json.dumps(tags), " ".join(sorted(set(tokenize(goal))))),
+                "INSERT INTO lessons (run_id, ts, text, tags, goal_tokens, agent_id) VALUES (?,?,?,?,?,?)",
+                (run_id, ts, text, json.dumps(tags), " ".join(sorted(set(tokenize(goal)))), agent_id or ""),
             )
             self._db.commit()
             lesson_id = int(cur.lastrowid)
-        return Lesson(id=lesson_id, run_id=run_id, ts=ts, text=text, tags=tags)
+        return Lesson(id=lesson_id, run_id=run_id, ts=ts, text=text, tags=tags, agent_id=agent_id or "")
 
     def all_lessons(self, limit: int = 100) -> list[dict]:
         with self._lock:
             rows = self._db.execute(
-                "SELECT id, run_id, ts, text, tags FROM lessons ORDER BY id DESC LIMIT ?", (limit,)
+                "SELECT id, run_id, ts, text, tags, agent_id FROM lessons ORDER BY id DESC LIMIT ?",
+                (limit,),
             ).fetchall()
         now = time.time()
         return [
-            Lesson(r["id"], r["run_id"], r["ts"], r["text"], json.loads(r["tags"])).as_dict(now) for r in rows
+            Lesson(
+                r["id"], r["run_id"], r["ts"], r["text"], json.loads(r["tags"]), r["agent_id"] or ""
+            ).as_dict(now)
+            for r in rows
         ]
 
-    def recall(self, goal: str, k: int = 3, exclude_run: str | None = None) -> list[Lesson]:
-        """Token-overlap recall. Zero matches is a state, not an error."""
+    def recall(
+        self,
+        goal: str,
+        k: int = 3,
+        exclude_run: str | None = None,
+        agent_id: str | None = None,
+    ) -> list[Lesson]:
+        """Token-overlap recall, preferring the executing agent's own lessons.
+
+        An agent with long-term memory is the whole point of naming one, so when
+        a run has an agent its own lessons outrank everyone else's — but only
+        among lessons that are relevant at all. A lesson with no token overlap is
+        not made relevant by having been learned by the right agent, and an agent
+        with nothing to say falls back to the shared pool rather than starting
+        from nothing. Zero matches remains a state, not an error.
+        """
         goal_set = set(tokenize(goal))
         with self._lock:
             rows = self._db.execute(
-                "SELECT id, run_id, ts, text, tags, goal_tokens FROM lessons ORDER BY id DESC LIMIT 500"
+                "SELECT id, run_id, ts, text, tags, goal_tokens, agent_id FROM lessons "
+                "ORDER BY id DESC LIMIT 500"
             ).fetchall()
         scored: list[tuple[float, Lesson]] = []
         for r in rows:
@@ -221,8 +262,14 @@ class Memory:
             overlap = len(goal_set & tokens)
             if overlap == 0:
                 continue
+            owner = r["agent_id"] or ""
+            mine = bool(agent_id) and owner == agent_id
+            score = overlap + (AGENT_RECALL_BONUS if mine else 0.0) + 1e-6 * r["id"]
             scored.append(
-                (overlap + 1e-6 * r["id"], Lesson(r["id"], r["run_id"], r["ts"], r["text"], json.loads(r["tags"])))
+                (
+                    score,
+                    Lesson(r["id"], r["run_id"], r["ts"], r["text"], json.loads(r["tags"]), owner),
+                )
             )
         scored.sort(key=lambda s: -s[0])
         return [lesson for _, lesson in scored[:k]]
@@ -236,7 +283,9 @@ def lessons_prompt_block(lessons: list[Lesson]) -> str:
     # data, and data gets escaped — otherwise a lesson can close its own tag and
     # the next run's planner reads the rest as instructions.
     body = "\n".join(
-        f"lesson {lesson.id} (from run {lesson.run_id}):\n"
+        f"lesson {lesson.id} (from run {lesson.run_id}"
+        + (f", learned by {xml_escape(lesson.agent_id)}" if lesson.agent_id else "")
+        + "):\n"
         f"<recalled_lesson>{xml_escape(lesson.text)}</recalled_lesson>"
         for lesson in lessons
     )
