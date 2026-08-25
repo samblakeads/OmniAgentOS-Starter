@@ -1,0 +1,75 @@
+{
+  "defaults": {
+    "mode": "advisory",
+    "pre_manual_qa": true,
+    "provider": "mock",
+    "when": [
+      "pull_request",
+      "merge_group",
+      "pre_manual_qa"
+    ]
+  },
+  "evidence_archive_root": "~/Work/Ops/var/testdriver",
+  "heal_policy": {
+    "block_on_guard_paths": true,
+    "guard_path_prefixes": [
+      "scripts/",
+      "scripts/gates/",
+      ".github/workflows/",
+      "configs/gates.yaml",
+      "configs/guard-paths.yaml",
+      "hooks/",
+      "dod.sh"
+    ],
+    "surface_diff": true
+  },
+  "rendered_from_sha256": "bbcf03de0b6ba0bb0efe8d108ff63fcc60e3d64def6761e7dbad55eb5391a191",
+  "repos": {
+    "samblakeads/OmniAgentOS-Starter": {
+      "app_url": "http://127.0.0.1:3000",
+      "enabled": true,
+      "flows": [
+        {
+          "config": "testdriver/vitest.config.mjs",
+          "file": "testdriver/starter-nav-layout.test.mjs",
+          "fixture_seed": "python3 -c \"print('starter public shell requires no fixture seed')\"",
+          "name": "starter-smoke",
+          "stable_chrome": true
+        }
+      ],
+      "mode": "advisory",
+      "pre_manual_qa": true,
+      "provider": "mock",
+      "start_command": "<start starter UI command>",
+      "when": [
+        "pull_request"
+      ]
+    }
+  },
+  "rip_out": {
+    "fp_rate_max": 0.1,
+    "healed_regression_max": 0,
+    "p95_latency_s": 1200,
+    "window_days": 14
+  },
+  "runner": {
+    "command_template": [
+      "npx",
+      "--no-install",
+      "vitest",
+      "run",
+      "{flow_file}",
+      "--config",
+      "{flow_config}"
+    ],
+    "image_pin": "UNPINNABLE on hosted v7: no CLI/SDK request field selects an immutable image; result evidence reports AMI/image version after provisioning. Custom images require Self-Hosted Enterprise; hosted runs remain advisory.",
+    "integrity": "sha512-9k1Mb7/Db4Pr0fIwJXpiaXfgtsmXUcDapK+JHsDx0DoeOyw8oUqj+Wjg5dOc9DT4jtOeU8FgWGRhjHkQNK06zQ==",
+    "invocation_verified": true,
+    "package": "testdriverai",
+    "version": "7.11.59",
+    "vitest_version": "4.0.18"
+  },
+  "runner_sha256": "c0231f4d977bcffd1635b54bfb68e589e1390999ce9dc509985193e18b197d0c",
+  "template_sha256": "bb1f798cd5daac3619425bae9be301f69dbb58b1de5ce14b86389297271b7782",
+  "version": 1
+}
