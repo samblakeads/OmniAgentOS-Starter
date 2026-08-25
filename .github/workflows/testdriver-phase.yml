@@ -1,0 +1,72 @@
+name: testdriver-phase
+
+on: [pull_request, merge_group, workflow_dispatch]
+
+permissions:
+  checks: write
+  contents: read
+
+jobs:
+  testdriver:
+    name: testdriver
+    # Use [self-hosted, estate] once the pinned estate runner image is verified;
+    # ubuntu-latest is the advisory-pilot placeholder and must never back a required gate.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Validate TestDriver configuration
+        run: python3 scripts/testdriver-phase.py config --validate --check-rendered --path configs/testdriver.json
+
+      - name: Run TestDriver phase
+        id: phase
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TD_API_KEY: ${{ secrets.TESTDRIVER_API_KEY }}
+        shell: bash
+        run: |
+          event="${{ github.event_name }}"
+          if [[ "$event" == "workflow_dispatch" ]]; then event="pull_request"; fi
+          result="$(python3 scripts/testdriver-phase.py run \
+            --repo "${{ github.repository }}" \
+            --event "$event" \
+            --head "${{ github.event.pull_request.head.sha || github.sha }}" \
+            --post-check --json)"
+          echo "$result"
+          archive_dir="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("archive_dir") or "")' "$result")"
+          verdict="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["verdict"])' "$result")"
+          mode="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["mode"])' "$result")"
+          echo "archive_dir=$archive_dir" >> "$GITHUB_OUTPUT"
+          echo "verdict=$verdict" >> "$GITHUB_OUTPUT"
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+
+      - name: Archive estate evidence bundle
+        if: steps.phase.outputs.archive_dir != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: testdriver-${{ github.run_id }}
+          path: ${{ steps.phase.outputs.archive_dir }}
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Enforce required mode
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          PHASE_OUTCOME: ${{ steps.phase.outcome }}
+          MODE: ${{ steps.phase.outputs.mode }}
+          VERDICT: ${{ steps.phase.outputs.verdict }}
+        run: |
+          check_count="$(gh api "repos/${{ github.repository }}/commits/$HEAD_SHA/check-runs" \
+            --jq '[.check_runs[] | select(.name == "testdriver" and .external_id == "estate-testdriver-phase-v1")] | length')"
+          if [[ ! "$check_count" =~ ^[1-9][0-9]*$ ]]; then
+            echo "testdriver check-run is absent for head $HEAD_SHA" >&2
+            exit 1
+          fi
+          if [[ "$PHASE_OUTCOME" != "success" ]]; then
+            exit 1
+          fi
+          if [[ "$VERDICT" == "block" || ( "$MODE" == "required" && "$VERDICT" == "fail" ) ]]; then
+            exit 1
+          fi
